@@ -1080,7 +1080,8 @@ function drawStatic() {
       clearTarget(screenTarget(), true);
       blit(cache.L, cache.cam, view, null, 1, cache.s);
       clearTimeout(settleTimer);
-      settleTimer = setTimeout(() => { settleTimer = null; draw(); }, 140);
+      // once the view settles, render it exactly (drawStatic alone would just keep showing the moved image)
+      settleTimer = setTimeout(() => { settleTimer = null; if (!anim && S) { renderExact(); draw(); } }, 140);
       return;
     }
     renderExact();
