@@ -16,6 +16,9 @@ critical radius, a fractal (drawn to a budget) above it.
 - **Following a piece.** Click a piece to select it: the camera rides with it through every turn (it stays at
   the same pixel even at ×10⁵ zoom, n = 200), and every slot it can reach (its orbit under the two turns) is
   outlined. An inset shows both disks, which one is turning, the view and the selected piece; click it to jump.
+- **Fractals.** Above the critical radius the cuts never stop. With pieces on, the closure is followed to 400k
+  cuts and the pieces of its first complete generations (about 80k cuts, half a million pieces or so) are traced
+  and coloured, with the cuts drawn to the same depth; "cuts by generation" follows the cuts to the full budget.
 - **Deep zoom.** When a turn would carry content more than 1.5 screens, it is shown as a crossfade: the cut pattern
   maps onto itself, so each slot takes on the colour of the piece that arrives (and, when riding with a piece, its
   own disk turns rigidly while the outside crossfades).

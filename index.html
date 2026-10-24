@@ -353,20 +353,42 @@ function solve(n, r, budget, progress) {
   for (const l of iv) arcs += l.length;
   const out = { cx: Float64Array.from(cx), cy: Float64Array.from(cy), pc: Int32Array.from(pc), ps: Float64Array.from(ps),
                 pe: Float64Array.from(pe), pg: Uint16Array.from(pg), circles: N, arcs, truncated };
-  if (wantFaces && arcs <= FACE_ARC_LIMIT) {
+  // A truncated (fractal) cut set has far too many pieces to trace in full; trace the pieces of its first complete
+  // generations instead (about FACE_CUTS cuts), and the page draws the cuts to the same depth.
+  let ivF = iv, arcsF = arcs;
+  if (wantFaces && truncated) {
+    const lim = Math.min(pc.length, FACE_CUTS);
+    const depth = Math.max(0, pg[lim - 1] - 1);
+    const lists = Array.from({ length: N }, () => []);
+    let K = 0;
+    for (; K < pc.length && pg[K] <= depth; K++) lists[pc[K]].push([ps[K], pe[K]]);
+    arcsF = 0;
+    ivF = lists.map(l => {
+      l.sort((a, b) => a[0] - b[0]);
+      const m = [];
+      for (const t of l) {
+        const last = m[m.length - 1];
+        if (last && t[0] <= last[1] + EPS) { if (t[1] > last[1]) last[1] = t[1]; } else m.push([t[0], t[1]]);
+      }
+      arcsF += m.length;
+      return m;
+    });
+    out.faceDepth = depth; out.faceCuts = K;
+  }
+  if (wantFaces && arcsF <= FACE_ARC_LIMIT) {
     // where each circle goes when disk A or B turns by +1/n (exact lookup; -1 if that circle is not in the set)
     const rot = disks.map(([dc, dv]) => {
       const m = new Int32Array(N);
       for (let i = 0; i < N; i++) m[i] = i === dc ? dc : cid(rotVec(i, dv), false);
       return m;
     });
-    Object.assign(out, buildFaces(out.cx, out.cy, iv, r, n, rot, progress));
+    Object.assign(out, buildFaces(out.cx, out.cy, ivF, r, n, rot, progress));
   }
   return out;
 }
 
 // ---- pieces: crossings of the arcs, the planar arrangement, and its faces (port of pieces_fast + faces) ----
-const FACE_ARC_LIMIT = 400000;
+const FACE_ARC_LIMIT = 400000, FACE_CUTS = 80000, PIECES_BUDGET = 400000;
 let wantFaces = true;
 function buildFaces(cx, cy, iv, r, n, rot, progress) {
   const ai = [], as = [], ae = [];
@@ -597,7 +619,8 @@ if (typeof self !== "undefined" && typeof window === "undefined" && typeof modul
     const { n, r, budget, id } = ev.data;
     const t0 = performance.now();
     wantFaces = ev.data.faces !== false;
-    const res = solve(n, r, budget, (c, p, g, phase) => self.postMessage({ id, progress: true, circles: c, cuts: p, gen: g, phase }));
+    // with pieces on, cuts deeper than the traced pieces are not drawn, so a fractal need not be followed as far
+    const res = solve(n, r, wantFaces ? Math.min(budget, PIECES_BUDGET) : budget, (c, p, g, phase) => self.postMessage({ id, progress: true, circles: c, cuts: p, gen: g, phase }));
     res.ms = performance.now() - t0;
     res.id = id;
     const bufs = ["cx", "cy", "pc", "ps", "pe", "pg", "EC", "E0", "E1", "FS", "FH", "FM", "FB", "PA", "PB"]
@@ -709,6 +732,8 @@ function onResult(ev) {
   for (let g = 1, acc = 0; g <= maxGen; g++) { S.bucket[g] = Math.min(K - 1, Math.floor(K * acc / Math.max(1, tot))); acc += cnt[g]; }
   splitByDisks();
   S.cx = d.cx; S.cy = d.cy;
+  S.faceDepth = d.FS && d.faceDepth != null ? d.faceDepth : null;
+  S.withPieces = d.FS != null || $("mode").value === "pieces";
   if (d.FS) {
     S.F = { EC: d.EC, E0: d.E0, E1: d.E1, FS: d.FS, FH: d.FH, FM: d.FM, FB: d.FB, PA: d.PA, PB: d.PB, NF: d.pieces };
     for (const [P, name] of [[d.PA, "PAi"], [d.PB, "PBi"]]) {      // inverse turns
@@ -727,7 +752,8 @@ function onResult(ev) {
   $("info").innerHTML = `<b>n = ${n}</b>, <b>r = ${+r.toPrecision(9)}</b>: ${fmt(d.circles)} circles, ${fmt(d.arcs)} arcs` +
     pc + `, ${maxGen} generations` +
     (!d.FS && $("mode").value === "pieces" ? " · too many cuts to trace the pieces; showing cuts" : "") +
-    (d.truncated ? ` · <b>stopped at the budget</b>: the cuts go on (a fractal), this is ${maxGen} generations deep` : "") +
+    (d.truncated ? ` · <b>a fractal</b>: the cuts never stop; computed ${maxGen} generations deep` +
+      (S.faceDepth != null ? `, pieces traced for the first ${S.faceDepth} (choose “cuts by generation” to see the cuts deeper)` : "") : "") +
     ` · ${(d.ms / 1000).toFixed(1)} s`;
   $("rampmax").textContent = `generation ${maxGen}`;
   resetView();
@@ -877,7 +903,9 @@ function pass(cam, which, rot, col, alpha) {
   }
   const cols = ramp(), K = cols.length, paths = cols.map(() => new Path2D());
   const ink = new Path2D(), plain = new Path2D();
-  const lim = growGen ?? Infinity, W2 = V.W2, H2 = V.H2, sc = V.sc, vx = V.vx, vy = V.vy, rho = V.rho;
+  // with pieces shown for a truncated fractal, draw the cuts only as deep as the traced pieces
+  const lim = growGen ?? (pieces && S.faceDepth != null ? S.faceDepth : Infinity);
+  const W2 = V.W2, H2 = V.H2, sc = V.sc, vx = V.vx, vy = V.vy, rho = V.rho;
   for (let k = 0; k < S.s.length; k++) {
     const g = S.g[k];
     if (g > lim || !keep(S.f[k])) continue;
@@ -1298,7 +1326,12 @@ function showKey() {
   const pieces = $("mode").value === "pieces";
   $("key-pieces").hidden = !pieces; $("key-cuts").hidden = pieces;
 }
-$("mode").onchange = () => { showKey(); if ($("mode").value === "pieces" && S && !S.F) compute(); else draw(); };
+$("mode").onchange = () => {
+  showKey();
+  // pieces need tracing; a fractal computed for pieces was cut short, so the cuts view recomputes it in full
+  if (S && (($("mode").value === "pieces" && !S.F) || ($("mode").value === "cuts" && S.truncated && S.withPieces))) compute();
+  else draw();
+};
 showKey();
 paintRamp();
 $("seq").textContent = A_N.length ? A_N.join(", ") : "";
