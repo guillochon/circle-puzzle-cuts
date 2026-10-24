@@ -1,0 +1,707 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Circle Puzzle Cuts</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+/* Layout: header with controls, one large canvas (the two disks), a key and an explanation. The canvas is redrawn
+   in Canvas 2D with the view transform done in double precision, so deep zooms stay sharp. */
+:root {
+  --bg: #eceff2;
+  --surface: #f8f9fa;
+  --fg: #1a2129;
+  --muted: #5a6573;
+  --line: #d3d9df;
+  --accent: #23415f;
+  --font-display: "Spectral", Georgia, "Times New Roman", serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1317; --surface: #161b21; --fg: #e4e9ee; --muted: #95a1ae; --line: #29313a;
+    --accent: #9cc3e6; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1317; --surface: #161b21; --fg: #e4e9ee; --muted: #95a1ae; --line: #29313a;
+  --accent: #9cc3e6; color-scheme: dark;
+}
+html, body { background: var(--bg); color: var(--fg); margin: 0; }
+body { font-family: var(--font-body); font-size: 14px; line-height: 1.5; }
+.wrap { max-width: 1320px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 56px; display: flex; flex-direction: column; gap: 20px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+.eyebrow a { color: inherit; }
+h1 { font-family: var(--font-display); font-weight: 600; font-size: 36px; line-height: 1.05; margin: 0 0 10px; text-wrap: balance; }
+h2 { font-family: var(--font-display); font-weight: 500; font-size: 22px; margin: 0 0 6px; }
+.lede { margin: 0; max-width: 72ch; color: var(--muted); }
+.lede b { color: var(--fg); font-weight: 500; }
+a { color: var(--accent); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+.controls label { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
+select, button, input { font: inherit; color: var(--fg); }
+select, input[type=number] { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+input[type=number] { width: 7.5em; font-family: var(--font-mono); font-size: 13px; }
+#n { width: 5em; }
+input[type=range] { accent-color: var(--accent); width: 150px; }
+button { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; }
+button.primary { font-weight: 600; border-color: var(--accent); background: var(--accent); color: var(--surface); }
+button:hover { filter: brightness(1.06); }
+button[aria-pressed=true] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.stage { position: relative; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden;
+  touch-action: none; user-select: none; }
+canvas { display: block; width: 100%; cursor: grab; }
+canvas.drag { cursor: grabbing; }
+.hud { position: absolute; left: 10px; top: 8px; font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+  pointer-events: none; background: color-mix(in srgb, var(--surface) 80%, transparent); padding: 2px 6px; border-radius: 4px; }
+.zoombar { position: absolute; right: 10px; top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.zoombar button { width: 34px; height: 34px; padding: 0; font-size: 18px; line-height: 1; }
+.busy { position: absolute; inset: 0; display: none; place-items: center; background: color-mix(in srgb, var(--surface) 70%, transparent);
+  font-family: var(--font-mono); font-size: 13px; color: var(--fg); }
+.busy.on { display: grid; }
+
+#info { font-size: 13px; color: var(--muted); min-height: 1.5em; }
+#info b { color: var(--fg); font-weight: 600; font-family: var(--font-mono); font-weight: 500; }
+
+.key { display: flex; flex-wrap: wrap; gap: 8px 22px; align-items: center; padding: 10px 14px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface); font-size: 13px; color: var(--muted); }
+.ramp { display: inline-flex; align-items: center; gap: 8px; }
+.ramp .bar { width: 160px; height: 10px; border-radius: 3px; }
+.ink { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--fg); vertical-align: middle; }
+
+.text { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 32px; }
+.text p { margin: 0 0 10px; color: var(--muted); max-width: 70ch; }
+.text p b { color: var(--fg); font-weight: 500; }
+.seq { font-family: var(--font-mono); font-size: 12.5px; color: var(--fg); overflow-wrap: anywhere; }
+footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Two-disk circle puzzles · compound symmetry groups GG<sub>n</sub></p>
+    <h1>Circle Puzzle Cuts</h1>
+    <p class="lede">Two overlapping disks of radius <b>r</b>, centred at ±1, each turn by <b>1/n</b> of a full turn.
+      Every turn carries the cuts inside one disk somewhere new, and they cut again. The drawing shows <b>all</b> the
+      cuts this ever makes: a finite puzzle below the critical radius, a fractal above it. Everything is computed in
+      your browser, exactly, for any n up to 200. Scroll or pinch to zoom; the finest detail at n = 200 is about a
+      millionth of the disk.</p>
+  </header>
+
+  <div class="controls">
+    <label for="n">n <input type="number" id="n" min="3" max="200" step="1" value="7"></label>
+    <input type="range" id="nslide" min="3" max="200" step="1" value="7" aria-label="n">
+    <label for="preset">radius
+      <select id="preset">
+        <option value="plateau">plateau (a(n) pieces)</option>
+        <option value="crit">critical radius (fractal)</option>
+        <option value="custom">custom</option>
+      </select></label>
+    <label for="r">r <input type="number" id="r" step="any" value="1.2"></label>
+    <input type="range" id="rslide" min="-5" max="0.35" step="0.001" value="-0.7" aria-label="radius (log scale of r − 1)">
+    <label for="budget">budget
+      <select id="budget"><option value="300000">300k cuts</option><option value="1500000" selected>1.5M cuts</option><option value="4000000">4M cuts</option></select></label>
+    <button type="button" id="go" class="primary">Compute</button>
+  </div>
+  <div class="controls">
+    <button type="button" id="turn" aria-pressed="false">Turn the disks</button>
+    <button type="button" id="grow" aria-pressed="false">Grow by generation</button>
+    <button type="button" id="finest">Zoom to the smallest cut</button>
+    <button type="button" id="reset">Reset view</button>
+    <label for="speed">speed <select id="speed"><option value="1600">slow</option><option value="800" selected>medium</option><option value="350">fast</option></select></label>
+  </div>
+
+  <div class="stage" id="stage">
+    <canvas id="cv" aria-label="The cut pattern of the two-disk circle puzzle"></canvas>
+    <div class="hud" id="hud"></div>
+    <div class="zoombar">
+      <button type="button" id="zin" aria-label="Zoom in">+</button>
+      <button type="button" id="zout" aria-label="Zoom out">−</button>
+    </div>
+    <div class="busy" id="busy"><span id="busytext">computing…</span></div>
+  </div>
+  <div id="info" aria-live="polite"></div>
+
+  <div class="key">
+    <span><span class="ink"></span> the two disk boundaries</span>
+    <span class="ramp">generation 1 <span class="bar" id="rampbar"></span> <span id="rampmax">last</span></span>
+    <span>A cut's generation is how many turns it took to make it from the disk boundaries.</span>
+  </div>
+
+  <section class="text">
+    <div>
+      <h2>What you are seeing</h2>
+      <p>Cut both disks along each other's boundary. Turning disk A by 1/n carries the arc of B's boundary that lies
+        inside A to a new place; that arc is now a cut too, and some of it lies inside B, so turning B carries it
+        further. Keep going until nothing new appears. What is left is every cut the puzzle can ever need, and the
+        pieces are the regions between them.</p>
+      <p>For n = 2, 3, 4 and 6 the turns generate a lattice, and the cuts stay finite at every radius. For every other n
+        there is a <b>critical radius</b>: below it the puzzle is finite, above it the cuts never stop and pile up into a
+        fractal (Hearn, Kretschmer, Rokicki, Streeter and Vergo, <a href="https://arxiv.org/abs/2302.12950">Two-Disk
+        Compound Symmetry Groups</a>). The “critical radius” preset uses their table (n = 5 to 100); there the
+        computation stops at the budget, so you see the fractal to a finite depth.</p>
+      <p><b>Turn the disks</b> animates the puzzle. On a finite puzzle every turn maps the cuts onto themselves, so
+        the pattern looks the same after each turn while the colours (the generations) are carried around.</p>
+    </div>
+    <div>
+      <h2>The sequence</h2>
+      <p>Once the disks overlap, a turn copies their shared lens n − 1 times around each disk, and the puzzle has
+        2n + 1 pieces. When neighbouring copies of the lens start to overlap, at r = sec(π/n), the count jumps and
+        then stays constant over a wide range of r. The “plateau” preset picks a radius inside that range. The number
+        of pieces there, for n = 3, 4, 5, …, is</p>
+      <p class="seq" id="seq"></p>
+      <p>For n ≥ 4 it fits a cubic quasi-polynomial of period 4, for example (n³ − n² + 4)/8 when n ≡ 2 (mod 4). These
+        values are not yet in the OEIS.</p>
+      <p><b>How it is computed.</b> Every cut is an arc of a circle of radius r whose centre lies in Z[ζ<sub>n</sub>],
+        so centres are stored as exact integer vectors and arc ends as “where this circle crosses that one”; nothing
+        is rounded until the angles are drawn. The piece counts come from a separate Python program that also traces
+        every piece and checks that their areas add up.</p>
+    </div>
+  </section>
+
+  <footer>Made by James Guillochon with Claude. Source in the oeis-sniper project (<code>viz/circle_puzzles/</code>,
+    computation in <code>attacks/circle_puzzles/</code>).</footer>
+</div>
+
+<script id="worker-src" type="text/js-worker">
+// Cut-set closure for the two-disk puzzle, exact in Z[zeta_n] (port of attacks/circle_puzzles/twodisk.py ExactPuzzle).
+const TAU = 2 * Math.PI, EPS = 1e-12;
+
+function polyDiv(a, b) {           // exact division by a monic integer polynomial; coefficients low to high
+  a = a.slice();
+  const db = b.length - 1, q = new Array(a.length - db).fill(0);
+  for (let k = a.length - 1; k >= db; k--) {
+    const c = a[k];
+    if (!c) continue;
+    q[k - db] = c;
+    for (let j = 0; j <= db; j++) a[k - db + j] -= c * b[j];
+  }
+  return q;
+}
+const cycMemo = {};
+function cyclo(n) {
+  if (cycMemo[n]) return cycMemo[n];
+  let p = new Array(n + 1).fill(0);
+  p[0] = -1; p[n] = 1;
+  for (let d = 1; d < n; d++) if (n % d === 0) p = polyDiv(p, cyclo(d));
+  return (cycMemo[n] = p);
+}
+
+function solve(n, r, budget, progress) {
+  const cp = cyclo(n), deg = cp.length - 1, phi = cp.slice(0, deg);
+  const zr = new Float64Array(deg), zi = new Float64Array(deg);
+  for (let k = 0; k < deg; k++) { zr[k] = Math.cos(TAU * k / n); zi[k] = Math.sin(TAU * k / n); }
+  let ex = new Int32Array(deg * 4096), N = 0;
+  const cx = [], cy = [], iv = [], buckets = new Map();
+
+  function cid(v) {
+    let x = 0, y = 0;
+    for (let k = 0; k < deg; k++) if (v[k]) { x += v[k] * zr[k]; y += v[k] * zi[k]; }
+    const key = Math.round(x * 1e8) + "," + Math.round(y * 1e8);
+    let lst = buckets.get(key);
+    if (lst) {
+      for (const i of lst) {
+        const o = i * deg;
+        let eq = true;
+        for (let k = 0; k < deg; k++) if (ex[o + k] !== v[k]) { eq = false; break; }
+        if (eq) return i;
+      }
+    } else { lst = []; buckets.set(key, lst); }
+    if ((N + 1) * deg > ex.length) { const g = new Int32Array(ex.length * 2); g.set(ex); ex = g; }
+    ex.set(v, N * deg);
+    cx.push(x); cy.push(y); iv.push([]); lst.push(N);
+    return N++;
+  }
+  function rotVec(i, a) {            // a + (centre_i - a) * zeta
+    const o = i * deg, w = new Int32Array(deg);
+    for (let k = 0; k < deg; k++) w[k] = ex[o + k] - a[k];
+    const top = w[deg - 1];
+    for (let k = deg - 1; k > 0; k--) w[k] = w[k - 1];
+    w[0] = 0;
+    if (top) for (let k = 0; k < deg; k++) w[k] -= top * phi[k];
+    for (let k = 0; k < deg; k++) w[k] += a[k];
+    return w;
+  }
+  // labels: lab >= 0 is (circle lab>>1, sign lab&1 ? + : -); lab < 0 is the fixed angle k*2pi/n with k = -lab-1
+  function ang(i, lab, end) {
+    let t;
+    if (lab < 0) t = ((-lab - 1) % n) * TAU / n;
+    else {
+      const p = lab >> 1, dx = cx[p] - cx[i], dy = cy[p] - cy[i];
+      const d = Math.hypot(dx, dy);
+      t = (Math.atan2(dy, dx) + ((lab & 1) ? 1 : -1) * Math.acos(Math.min(1, d / (2 * r)))) % TAU;
+      if (t < 0) t += TAU;
+    }
+    return end && t === 0 ? TAU : t;
+  }
+  function place(i, ls, le) {
+    const s = ang(i, ls, false), e = ang(i, le, true);
+    if (e >= s) return [[s, e, ls, le]];
+    return [[s, TAU, ls, -1], [0, e, -1, le]];
+  }
+  function merge(list) {
+    list.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const out = [];
+    for (const it of list) {
+      const last = out[out.length - 1];
+      if (last && it[0] <= last[1] + EPS) {
+        if (it[1] > last[1]) out[out.length - 1] = [last[0], it[1], last[2], it[3]];
+      } else out.push(it);
+    }
+    return out;
+  }
+  function subtract(list, have) {
+    const out = [];
+    for (const [s, e, ls, le] of list) {
+      let cur = s, cl = ls;
+      for (const [hs, he, hls, hle] of have) {
+        if (he <= cur) continue;
+        if (hs >= e) break;
+        if (hs > cur) out.push(hs < e ? [cur, hs, cl, hls] : [cur, e, cl, le]);
+        if (he > cur) { cur = he; cl = hle; }
+        if (cur >= e) break;
+      }
+      if (cur < e) out.push([cur, e, cl, le]);
+    }
+    return out.filter(t => t[1] - t[0] > EPS);
+  }
+  function add(i, list) {
+    const fresh = subtract(merge(list), iv[i]);
+    if (fresh.length) iv[i] = merge(iv[i].concat(fresh));
+    return fresh;
+  }
+
+  const one = new Int32Array(deg); one[0] = 1;
+  const neg = new Int32Array(deg); neg[0] = -1;
+  const disks = [[cid(neg), neg], [cid(one), one]];
+  const pc = [], ps = [], pe = [], pg = [];
+  const queue = [];
+  for (const [i] of disks) {
+    const fresh = add(i, [[0, TAU, -1, -1]]);
+    for (const t of fresh) { pc.push(i); ps.push(t[0]); pe.push(t[1]); pg.push(0); }
+    queue.push([i, fresh, 0]);
+  }
+  let head = 0, truncated = false, lastPost = Date.now();
+  outer:
+  while (head < queue.length) {
+    const [i, ivs, gen] = queue[head]; queue[head++] = null;
+    for (const [dc, dv] of disks) {
+      if (dc === i) continue;
+      const dist = Math.hypot(cx[dc] - cx[i], cy[dc] - cy[i]);
+      if (dist >= 2 * r) continue;
+      const inside = [];
+      for (const [a, b, la, lb] of place(i, 2 * dc, 2 * dc + 1)) {
+        for (const [s, e, ls, le] of ivs) {
+          const lo = s >= a ? s : a, llo = s >= a ? ls : la;
+          const hi = e <= b ? e : b, lhi = e <= b ? le : lb;
+          if (hi - lo > EPS) inside.push([llo, lhi]);
+        }
+      }
+      if (!inside.length) continue;
+      const j = cid(rotVec(i, dv));
+      const move = lab => lab < 0 ? -(((-lab - 1) + 1) % n) - 1 : 2 * cid(rotVec(lab >> 1, dv)) + (lab & 1);
+      const img = [];
+      for (const [ls, le] of inside) for (const t of place(j, move(ls), move(le))) img.push(t);
+      const fresh = add(j, img);
+      if (fresh.length) {
+        for (const t of fresh) { pc.push(j); ps.push(t[0]); pe.push(t[1]); pg.push(gen + 1); }
+        queue.push([j, fresh, gen + 1]);
+        if (pc.length > budget) { truncated = true; break outer; }
+      }
+    }
+    if (progress && Date.now() - lastPost > 250) { lastPost = Date.now(); progress(N, pc.length, gen); }
+  }
+  let arcs = 0;
+  for (const l of iv) arcs += l.length;
+  return { cx: Float64Array.from(cx), cy: Float64Array.from(cy), pc: Int32Array.from(pc), ps: Float64Array.from(ps),
+           pe: Float64Array.from(pe), pg: Uint16Array.from(pg), circles: N, arcs, truncated };
+}
+
+if (typeof self !== "undefined" && typeof window === "undefined" && typeof module === "undefined") {
+  self.onmessage = ev => {
+    const { n, r, budget, id } = ev.data;
+    const t0 = performance.now();
+    const res = solve(n, r, budget, (c, p, g) => self.postMessage({ id, progress: true, circles: c, cuts: p, gen: g }));
+    res.ms = performance.now() - t0;
+    res.id = id;
+    self.postMessage(res, [res.cx.buffer, res.cy.buffer, res.pc.buffer, res.ps.buffer, res.pe.buffer, res.pg.buffer]);
+  };
+}
+if (typeof module !== "undefined") module.exports = { solve, cyclo };
+</script>
+
+<script>
+"use strict";
+// a(n) = pieces on the plateau just above r = sec(pi/n), n = 3..200 (attacks/circle_puzzles, exact solver).
+const A_N = [69,35,169,23,443,189,683,113,1213,515,1597,319,2423,1061,2959,689,4121,1875,4817,1271,6355,3005,7219,2113,9173,4499,10213,3263,12623,6405,13847,4769,16753,8771,18169,6679,21611,11645,23227,9041,27245,15075,29069,11903,33703,19109,35743,15313,41033,23795,43297,19319,49283,29181,51779,23969,58501,35315,61237,29311,68735,42245,71719,35393,80033,50019,83273,42263,92443,58685,95947,49969,106013,68291,109789,58559,120791,78885,124847,68081,136825,90515,141169,78583,154163,103229,158803,90113,172853,117075,177797,102719,192943,132101,198199,116449,214481,148355,220057,131351,237515,165885,243419,147473,262093,184739,268333,164863,288263,204965,294847,183569,316073,226611,323009,203639,345571,249725,352867,225121,376805,274355,384469,248063,409823,300549,417863,272513,444673,328355,453097,298519,481403,357821,490219,326129,520061,388995,529277,355391,560695,421925,570319,386353,603353,456659,613393,419063,648083,493245,658547,453569,694933,531731,705829,489919,743951,572165,755287,528161,795185,614595,806969,568343,848683,659069,860923,610513,904493,705635,917197,654719,962663,754341,975839,701009,1023241,805235,1036897,749431,1086275,858365,1100419,800033,1151813,913779,1166453,852863,1219903,971525,1235047,907969,1290593,1031651,1306249,965399,1363931,1094205];
+// Critical radii from Hearn et al., Appendix A (n = 5..100; n = 2, 3, 4, 6 never go infinite).
+const CRIT = {5:2.148961,7:1.623574,8:1.711411,9:1.408482,10:1.543357,11:1.290582,12:1.376547,13:1.213594,14:1.196554,
+15:1.163276,16:1.148470,17:1.127509,18:1.121505,19:1.104246,20:1.100581,21:1.086016,22:1.078162,23:1.072011,24:1.071404,
+25:1.061321,26:1.056958,27:1.052668,28:1.049731,29:1.045731,30:1.043758,31:1.040158,32:1.037741,33:1.035512,34:1.033498,
+35:1.031647,36:1.030127,37:1.028368,38:1.026958,39:1.025591,40:1.024352,41:1.023174,42:1.022142,43:1.021105,44:1.020197,
+45:1.019279,46:1.018459,47:1.017692,48:1.016968,49:1.016287,50:1.015651,51:1.015053,52:1.014492,53:1.013942,54:1.013437,
+55:1.012954,56:1.012498,57:1.012067,58:1.011657,59:1.011267,60:1.010908,61:1.010545,62:1.010210,63:1.009890,64:1.009585,
+65:1.009294,66:1.009018,67:1.008750,68:1.008499,69:1.008253,70:1.008020,71:1.007797,72:1.007582,73:1.007377,74:1.007180,
+75:1.006990,76:1.006809,77:1.006633,78:1.006465,79:1.006302,80:1.006146,81:1.005996,82:1.005851,83:1.005712,84:1.005578,
+85:1.005447,86:1.005321,87:1.005200,88:1.005083,89:1.004970,90:1.004860,91:1.004754,92:1.004652,93:1.004552,94:1.004456,
+95:1.004363,96:1.004273,97:1.004186,98:1.004101,99:1.004019,100:1.003939};
+const TAU = 2 * Math.PI;
+const $ = id => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d");
+
+// sequential blue ramp (dataviz reference palette); early generations dark, late ones light, reversed in dark mode.
+// Both ends stay visible as 1px lines on their surface.
+const RAMP = ["#0d366b", "#104281", "#184f95", "#1c5cab", "#256abf", "#2a78d6", "#3987e5", "#5598e7"];
+const RAMP_DARK = ["#e6effc", "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5"];
+const dark = () => getComputedStyle(document.documentElement).colorScheme === "dark" ||
+  (matchMedia("(prefers-color-scheme: dark)").matches && document.documentElement.dataset.theme !== "light");
+const ramp = () => dark() ? RAMP_DARK : RAMP;
+
+const workerURL = URL.createObjectURL(new Blob([$("worker-src").textContent], { type: "text/javascript" }));
+let worker = null, busy = false;
+function freshWorker() {           // a new request cancels the one in flight
+  if (worker && !busy) return worker;
+  if (worker) worker.terminate();
+  worker = new Worker(workerURL);
+  worker.onmessage = onResult;
+  return worker;
+}
+let job = 0;
+let S = null;              // current puzzle: {n, r, x, y, s, e, g, f (disk membership), maxGen, ...}
+const view = { x: 0, y: 0, s: 1 };   // world point at the canvas centre, CSS px per unit
+let baseScale = 1;
+let anim = null;           // {disk, dir, t0, dur}
+let growGen = null;
+
+function plateauR(n) {
+  const s = 1 / Math.cos(Math.PI / n);
+  return s + (n <= 4 ? 0.2 : 1.3) * (s - 1);
+}
+function fmt(x) { return x.toLocaleString("en-US"); }
+
+function setR(r, fromSlider) {
+  $("r").value = +r.toPrecision(12);
+  if (!fromSlider) $("rslide").value = Math.log10(Math.max(1e-5, r - 1));
+}
+function applyPreset() {
+  const n = +$("n").value, p = $("preset").value;
+  if (p === "plateau") setR(plateauR(n));
+  else if (p === "crit") {
+    if (CRIT[n]) setR(CRIT[n] * (1 + 1e-6));
+    else { $("preset").value = "custom"; $("info").textContent = n in { 3: 1, 4: 1, 6: 1 } ?
+      `n = ${n} has no critical radius: its cuts stay finite at every radius.` :
+      `The critical-radius table covers n = 5 to 100.`; }
+  }
+}
+
+function compute() {
+  const n = Math.max(3, Math.min(200, Math.round(+$("n").value))), r = +$("r").value;
+  if (!(r > 1)) { $("info").textContent = "The disks only interact once r > 1."; return; }
+  stopAnim();
+  job++;
+  $("busy").classList.add("on");
+  $("busytext").textContent = `computing n = ${n}…`;
+  freshWorker().postMessage({ n, r, budget: +$("budget").value, id: job });
+  busy = true;
+  location.hash = `n=${n}&r=${r}`;
+}
+
+function onResult(ev) {
+  const d = ev.data;
+  if (d.id !== job) return;
+  if (d.progress) { $("busytext").textContent = `${fmt(d.circles)} circles · ${fmt(d.cuts)} cuts · generation ${d.gen}`; return; }
+  busy = false;
+  $("busy").classList.remove("on");
+  const n = +$("n").value, r = +$("r").value;
+  const m = d.pc.length;
+  const x = new Float64Array(m), y = new Float64Array(m);
+  let maxGen = 0;
+  for (let k = 0; k < m; k++) { x[k] = d.cx[d.pc[k]]; y[k] = d.cy[d.pc[k]]; if (d.pg[k] > maxGen) maxGen = d.pg[k]; }
+  S = { n, r, x, y, s: d.ps, e: d.pe, g: d.pg, maxGen, circles: d.circles, arcs: d.arcs, truncated: d.truncated, ms: d.ms };
+  // colour bucket per generation by quantile of the cuts, so each colour covers about the same number of cuts
+  const K = RAMP.length, cnt = new Float64Array(maxGen + 1);
+  for (let k = 0; k < m; k++) cnt[d.pg[k]]++;
+  S.bucket = new Uint8Array(maxGen + 1);
+  const tot = m - cnt[0];
+  for (let g = 1, acc = 0; g <= maxGen; g++) { S.bucket[g] = Math.min(K - 1, Math.floor(K * acc / Math.max(1, tot))); acc += cnt[g]; }
+  splitByDisks();
+  const a = A_N[n - 3];
+  const plateau = a && $("preset").value === "plateau";
+  $("info").innerHTML = `<b>n = ${n}</b>, <b>r = ${+r.toPrecision(9)}</b>: ${fmt(d.circles)} circles, ${fmt(d.arcs)} arcs, ` +
+    `${maxGen} generations` + (plateau ? `, <b>${fmt(a)}</b> pieces (the plateau value a(${n}))` : "") +
+    (d.truncated ? ` · <b>stopped at the budget</b>: the cuts go on (a fractal), this is ${maxGen} generations deep` : "") +
+    ` · ${(d.ms / 1000).toFixed(1)} s`;
+  $("rampmax").textContent = `generation ${maxGen}`;
+  resetView();
+}
+
+// Split every cut where it crosses a disk boundary and mark which disk(s) it lies in, so a turn moves exactly the
+// cuts inside the turning disk.
+function splitByDisks() {
+  const { r } = S;
+  const X = [], Y = [], Sa = [], Ea = [], G = [], F = [];
+  const inDisk = (px, py, cxD) => (px - cxD) ** 2 + py * py <= r * r * (1 + 1e-12);
+  for (let k = 0; k < S.s.length; k++) {
+    const x = S.x[k], y = S.y[k], s = S.s[k], e = S.e[k];
+    const cuts = [s, e];
+    for (const cxD of [-1, 1]) {
+      const dx = cxD - x, dy = -y, dist = Math.hypot(dx, dy);
+      if (dist < 1e-12 || dist >= 2 * r) continue;
+      const m = Math.atan2(dy, dx), h = Math.acos(dist / (2 * r));
+      for (const b of [m - h, m + h]) {
+        let t = s + (((b - s) % TAU) + TAU) % TAU;
+        if (t > s + 1e-13 && t < e - 1e-13) cuts.push(t);
+      }
+    }
+    cuts.sort((a, b) => a - b);
+    for (let c = 0; c + 1 < cuts.length; c++) {
+      const a = cuts[c], b = cuts[c + 1];
+      if (b - a < 1e-15) continue;
+      const t = (a + b) / 2, px = x + r * Math.cos(t), py = y + r * Math.sin(t);
+      X.push(x); Y.push(y); Sa.push(a); Ea.push(b); G.push(S.g[k]);
+      F.push((inDisk(px, py, -1) ? 1 : 0) | (inDisk(px, py, 1) ? 2 : 0));
+    }
+  }
+  Object.assign(S, { x: Float64Array.from(X), y: Float64Array.from(Y), s: Float64Array.from(Sa), e: Float64Array.from(Ea),
+                     g: Uint16Array.from(G), f: Uint8Array.from(F) });
+}
+
+function size() {
+  const w = $("stage").clientWidth;
+  const h = Math.round(Math.min(Math.max(320, w * 0.56), innerHeight * 0.72));
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  cv.style.height = h + "px";
+  return { w, h, dpr };
+}
+function resetView() {
+  const { w, h } = size();
+  const r = S ? S.r : 1.2;
+  baseScale = Math.min(w / (2 + 2 * r) / 1.04, h / (2 * r) / 1.06);
+  view.x = 0; view.y = 0; view.s = baseScale;
+  draw();
+}
+
+function draw() {
+  const W = cv.width, H = cv.height, dpr = cv.width / cv.clientWidth;
+  const css = getComputedStyle(document.documentElement);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = css.getPropertyValue("--surface").trim();
+  ctx.fillRect(0, 0, W, H);
+  $("hud").textContent = `zoom ×${(view.s / baseScale).toPrecision(3)}`;
+  if (!S) return;
+  const sc = view.s * dpr, r = S.r, vx = view.x, vy = view.y;
+  const rho = Math.hypot(W, H) / 2 / sc;
+  const cols = ramp(), K = cols.length;
+  const paths = cols.map(() => new Path2D());
+  const ink = new Path2D();
+  let th = 0, mdisk = 0, cth = 1, sth = 0;
+  if (anim) {
+    const u = Math.min(1, (performance.now() - anim.t0) / anim.dur);
+    th = anim.dir * (TAU / S.n) * (u < .5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u));
+    mdisk = anim.disk; cth = Math.cos(th); sth = Math.sin(th);
+  }
+  const lim = growGen ?? Infinity;
+  const W2 = W / 2, H2 = H / 2;
+  for (let k = 0; k < S.s.length; k++) {
+    const g = S.g[k];
+    if (g > lim) continue;
+    let x = S.x[k], y = S.y[k], s = S.s[k], e = S.e[k];
+    if (mdisk && (S.f[k] & mdisk)) {
+      const ox = mdisk === 1 ? -1 : 1, dx = x - ox;
+      x = ox + dx * cth - y * sth; y = dx * sth + y * cth; s += th; e += th;
+    }
+    const dxv = vx - x, dyv = vy - y, d = Math.hypot(dxv, dyv);
+    if (d > r + rho || d < r - rho) continue;
+    let wins = [[s, e]];
+    if (rho < r && d > 1e-300) {
+      const c = (d * d + r * r - rho * rho) / (2 * d * r);
+      if (c > -1) {
+        const h = Math.acos(Math.min(1, c)), m = Math.atan2(dyv, dxv);
+        let w0 = s + ((((m - h) - s) % TAU) + TAU) % TAU;
+        wins = [];
+        for (const a0 of [w0 - TAU, w0]) {
+          const lo = Math.max(s, a0), hi = Math.min(e, a0 + 2 * h);
+          if (hi > lo) wins.push([lo, hi]);
+        }
+      }
+    }
+    const path = g === 0 ? ink : paths[S.bucket[g]];
+    const dt = 2 * Math.sqrt(0.5 / (r * sc));   // keeps the chord within ~1/4 px of the arc
+    const bx = (x - vx) * sc + W2, by = (vy - y) * sc + H2;
+    for (const [t0, t1] of wins) {
+      const L = r * (t1 - t0) * sc;
+      if (L < 0.35) continue;
+      const nseg = Math.min(4000, Math.max(1, Math.ceil((t1 - t0) / dt)));
+      path.moveTo(bx + r * Math.cos(t0) * sc, by - r * Math.sin(t0) * sc);
+      for (let q = 1; q <= nseg; q++) {
+        const t = t0 + (t1 - t0) * q / nseg;
+        path.lineTo(bx + r * Math.cos(t) * sc, by - r * Math.sin(t) * sc);
+      }
+    }
+  }
+  ctx.lineCap = "round";
+  ctx.lineWidth = Math.max(1, 0.9 * dpr);
+  for (let q = K - 1; q >= 0; q--) { ctx.strokeStyle = cols[q]; ctx.stroke(paths[q]); }
+  ctx.lineWidth = 1.6 * dpr;
+  ctx.strokeStyle = css.getPropertyValue("--fg").trim();
+  ctx.stroke(ink);
+}
+
+// ---- animation ----
+function stopAnim() {
+  anim = null; growGen = null;
+  $("turn").setAttribute("aria-pressed", "false"); $("grow").setAttribute("aria-pressed", "false");
+}
+let nextDisk = 1;
+function frame() {
+  if (anim) {
+    if (performance.now() - anim.t0 >= anim.dur) {
+      finishTurn();
+      if ($("turn").getAttribute("aria-pressed") === "true") startTurn();
+    }
+    draw();
+    if (anim || $("turn").getAttribute("aria-pressed") === "true") requestAnimationFrame(frame);
+  }
+}
+function startTurn() {
+  anim = { disk: nextDisk, dir: Math.random() < .5 ? 1 : -1, t0: performance.now(), dur: +$("speed").value };
+  nextDisk = 3 - nextDisk;
+}
+function finishTurn() {
+  const th = anim.dir * TAU / S.n, c = Math.cos(th), s = Math.sin(th), D = anim.disk, ox = D === 1 ? -1 : 1;
+  for (let k = 0; k < S.s.length; k++) {
+    if (!(S.f[k] & D)) continue;
+    const dx = S.x[k] - ox, y = S.y[k];
+    S.x[k] = ox + dx * c - y * s; S.y[k] = dx * s + y * c;
+    const len = S.e[k] - S.s[k];
+    S.s[k] = (((S.s[k] + th) % TAU) + TAU) % TAU; S.e[k] = S.s[k] + len;
+  }
+  anim = null;
+  splitByDisks();   // membership changes after a turn
+}
+$("turn").onclick = () => {
+  if (!S) return;
+  const on = $("turn").getAttribute("aria-pressed") !== "true";
+  growGen = null; $("grow").setAttribute("aria-pressed", "false");
+  $("turn").setAttribute("aria-pressed", String(on));
+  if (on && !anim) { startTurn(); requestAnimationFrame(frame); }
+};
+let growTimer = null;
+$("grow").onclick = () => {
+  if (!S) return;
+  const on = $("grow").getAttribute("aria-pressed") !== "true";
+  $("turn").setAttribute("aria-pressed", "false");
+  $("grow").setAttribute("aria-pressed", String(on));
+  clearInterval(growTimer);
+  if (!on) { growGen = null; draw(); return; }
+  growGen = 0;
+  const stepMs = Math.max(60, +$("speed").value * 4 / Math.max(8, S.maxGen));
+  growTimer = setInterval(() => {
+    growGen++;
+    if (growGen > S.maxGen) { growGen = 0; }
+    draw();
+    if ($("grow").getAttribute("aria-pressed") !== "true") { clearInterval(growTimer); growGen = null; draw(); }
+  }, stepMs);
+  draw();
+};
+
+// ---- zoom & pan ----
+const MAXZ = 1e12;
+function zoomAt(px, py, f) {
+  const ns = Math.min(baseScale * MAXZ, Math.max(baseScale * 0.5, view.s * f));
+  const rect = cv.getBoundingClientRect();
+  const wx = view.x + (px - rect.width / 2) / view.s, wy = view.y - (py - rect.height / 2) / view.s;
+  view.s = ns;
+  view.x = wx - (px - rect.width / 2) / ns; view.y = wy + (py - rect.height / 2) / ns;
+  requestDraw();
+}
+let drawQueued = false;
+function requestDraw() { if (!drawQueued) { drawQueued = true; requestAnimationFrame(() => { drawQueued = false; draw(); }); } }
+cv.addEventListener("wheel", ev => {
+  ev.preventDefault();
+  const rect = cv.getBoundingClientRect();
+  zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, Math.exp(-ev.deltaY * (ev.deltaMode ? 0.05 : 0.0018)));
+}, { passive: false });
+const ptrs = new Map();
+let pinch = null;
+cv.addEventListener("pointerdown", ev => { cv.setPointerCapture(ev.pointerId); ptrs.set(ev.pointerId, [ev.clientX, ev.clientY]); cv.classList.add("drag"); });
+cv.addEventListener("pointermove", ev => {
+  if (!ptrs.has(ev.pointerId)) return;
+  const prev = ptrs.get(ev.pointerId);
+  ptrs.set(ev.pointerId, [ev.clientX, ev.clientY]);
+  if (ptrs.size === 1) {
+    view.x -= (ev.clientX - prev[0]) / view.s; view.y += (ev.clientY - prev[1]) / view.s;
+    requestDraw();
+  } else if (ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()];
+    const dist = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    const rect = cv.getBoundingClientRect();
+    const mx = (a[0] + b[0]) / 2 - rect.left, my = (a[1] + b[1]) / 2 - rect.top;
+    if (pinch) zoomAt(mx, my, dist / pinch);
+    pinch = dist;
+  }
+});
+const up = ev => { ptrs.delete(ev.pointerId); if (ptrs.size < 2) pinch = null; if (!ptrs.size) cv.classList.remove("drag"); };
+cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", up);
+cv.addEventListener("dblclick", ev => { const rect = cv.getBoundingClientRect(); zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, ev.shiftKey ? 0.25 : 4); });
+$("zin").onclick = () => zoomAt(cv.clientWidth / 2, cv.clientHeight / 2, 3);
+$("zout").onclick = () => zoomAt(cv.clientWidth / 2, cv.clientHeight / 2, 1 / 3);
+$("reset").onclick = () => S && resetView();
+$("finest").onclick = () => {
+  if (!S) return;
+  let best = -1, bl = Infinity;
+  for (let k = 0; k < S.s.length; k++) {
+    if (S.g[k] === 0) continue;
+    const l = S.r * (S.e[k] - S.s[k]);
+    if (l > 1e-13 && l < bl) { bl = l; best = k; }
+  }
+  if (best < 0) return;
+  const t = (S.s[best] + S.e[best]) / 2;
+  view.x = S.x[best] + S.r * Math.cos(t); view.y = S.y[best] + S.r * Math.sin(t);
+  view.s = Math.min(baseScale * MAXZ, 160 / bl);
+  draw();
+  $("info").innerHTML += ` · smallest cut: length ${bl.toExponential(2)}`;
+};
+addEventListener("keydown", ev => {
+  if (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT") return;
+  if (ev.key === "+" || ev.key === "=") $("zin").click();
+  else if (ev.key === "-") $("zout").click();
+  else if (ev.key === "0") $("reset").click();
+});
+addEventListener("resize", () => { const z = view.s / baseScale; const { w, h } = size(); if (S) { baseScale = Math.min(w / (2 + 2 * S.r) / 1.04, h / (2 * S.r) / 1.06); view.s = baseScale * z; } draw(); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { paintRamp(); draw(); });
+
+// ---- controls ----
+$("n").onchange = () => { $("nslide").value = $("n").value; applyPreset(); compute(); };
+$("nslide").oninput = () => { $("n").value = $("nslide").value; applyPreset(); };
+$("nslide").onchange = () => compute();
+$("preset").onchange = () => { applyPreset(); compute(); };
+$("r").onchange = () => { $("preset").value = "custom"; setR(+$("r").value); compute(); };
+$("rslide").oninput = () => { $("preset").value = "custom"; setR(1 + 10 ** +$("rslide").value, true); };
+$("rslide").onchange = () => compute();
+$("go").onclick = compute;
+$("speed").onchange = () => { if ($("grow").getAttribute("aria-pressed") === "true") { $("grow").click(); $("grow").click(); } };
+
+function paintRamp() { $("rampbar").style.background = `linear-gradient(90deg, ${ramp().join(",")})`; }
+paintRamp();
+$("seq").textContent = A_N.length ? A_N.join(", ") : "";
+
+(function init() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  const n = Math.max(3, Math.min(200, +(h.get("n") || 7)));
+  $("n").value = n; $("nslide").value = n;
+  const hr = +h.get("r");
+  if (hr && Math.abs(hr - plateauR(n)) > 1e-7 * (plateauR(n) - 1)) { $("preset").value = "custom"; setR(hr); } else applyPreset();
+  size(); draw();
+  compute();
+})();
+</script>
+</html>
