@@ -75,6 +75,11 @@ canvas.drag { cursor: grabbing; }
   border-radius: 8px; background: var(--surface); font-size: 13px; color: var(--muted); }
 .ramp { display: inline-flex; align-items: center; gap: 8px; }
 .ramp .bar { width: 160px; height: 10px; border-radius: 3px; }
+.sws { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+.sw { display: inline-flex; gap: 2px; align-items: center; }
+.sw i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+.sw b { font-weight: 500; color: var(--fg); margin-left: 5px; }
+.key[hidden] { display: none; }
 .ink { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--fg); vertical-align: middle; }
 
 .text { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 32px; }
@@ -115,6 +120,8 @@ footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--lin
     <button type="button" id="grow" aria-pressed="false">Grow by generation</button>
     <button type="button" id="finest">Zoom to the smallest cut</button>
     <button type="button" id="reset">Reset view</button>
+    <label for="mode">show
+      <select id="mode"><option value="pieces" selected>coloured pieces</option><option value="cuts">cuts by generation</option></select></label>
     <label for="speed">speed <select id="speed"><option value="1600">slow</option><option value="800" selected>medium</option><option value="350">fast</option></select></label>
   </div>
 
@@ -129,7 +136,12 @@ footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--lin
   </div>
   <div id="info" aria-live="polite"></div>
 
-  <div class="key">
+  <div class="key" id="key-pieces">
+    <span class="sws" id="swatches"></span>
+    <span>Every piece has its own shade: blue-green if it starts in the left disk only, gold in the right disk
+      only, violet in the lens they share. Turn the disks and the pieces carry their colours with them.</span>
+  </div>
+  <div class="key" id="key-cuts" hidden>
     <span><span class="ink"></span> the two disk boundaries</span>
     <span class="ramp">generation 1 <span class="bar" id="rampbar"></span> <span id="rampmax">last</span></span>
     <span>A cut's generation is how many turns it took to make it from the disk boundaries.</span>
@@ -147,8 +159,10 @@ footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--lin
         fractal (Hearn, Kretschmer, Rokicki, Streeter and Vergo, <a href="https://arxiv.org/abs/2302.12950">Two-Disk
         Compound Symmetry Groups</a>). The “critical radius” preset uses their table (n = 5 to 100); there the
         computation stops at the budget, so you see the fractal to a finite depth.</p>
-      <p><b>Turn the disks</b> animates the puzzle. On a finite puzzle every turn maps the cuts onto themselves, so
-        the pattern looks the same after each turn while the colours (the generations) are carried around.</p>
+      <p><b>Turn the disks</b> animates the puzzle. On a finite puzzle every turn maps the pieces onto pieces, so the
+        cut pattern looks the same after each turn while the coloured pieces travel: pieces that start in one disk
+        pass through the lens into the other. The piece count shown is traced live in your browser (every crossing,
+        every face), independently of the table below.</p>
     </div>
     <div>
       <h2>The sequence</h2>
@@ -201,7 +215,7 @@ function solve(n, r, budget, progress) {
   let ex = new Int32Array(deg * 4096), N = 0;
   const cx = [], cy = [], iv = [], buckets = new Map();
 
-  function cid(v) {
+  function cid(v, insert = true) {   // index of the circle centred at v (exact), added if new; -1 if absent and !insert
     let x = 0, y = 0;
     for (let k = 0; k < deg; k++) if (v[k]) { x += v[k] * zr[k]; y += v[k] * zi[k]; }
     const key = Math.round(x * 1e8) + "," + Math.round(y * 1e8);
@@ -213,7 +227,9 @@ function solve(n, r, budget, progress) {
         for (let k = 0; k < deg; k++) if (ex[o + k] !== v[k]) { eq = false; break; }
         if (eq) return i;
       }
-    } else { lst = []; buckets.set(key, lst); }
+    }
+    if (!insert) return -1;
+    if (!lst) { lst = []; buckets.set(key, lst); }
     if ((N + 1) * deg > ex.length) { const g = new Int32Array(ex.length * 2); g.set(ex); ex = g; }
     ex.set(v, N * deg);
     cx.push(x); cy.push(y); iv.push([]); lst.push(N);
@@ -320,18 +336,258 @@ function solve(n, r, budget, progress) {
   }
   let arcs = 0;
   for (const l of iv) arcs += l.length;
-  return { cx: Float64Array.from(cx), cy: Float64Array.from(cy), pc: Int32Array.from(pc), ps: Float64Array.from(ps),
-           pe: Float64Array.from(pe), pg: Uint16Array.from(pg), circles: N, arcs, truncated };
+  const out = { cx: Float64Array.from(cx), cy: Float64Array.from(cy), pc: Int32Array.from(pc), ps: Float64Array.from(ps),
+                pe: Float64Array.from(pe), pg: Uint16Array.from(pg), circles: N, arcs, truncated };
+  if (wantFaces && arcs <= FACE_ARC_LIMIT) {
+    // where each circle goes when disk A or B turns by +1/n (exact lookup; -1 if that circle is not in the set)
+    const rot = disks.map(([dc, dv]) => {
+      const m = new Int32Array(N);
+      for (let i = 0; i < N; i++) m[i] = i === dc ? dc : cid(rotVec(i, dv), false);
+      return m;
+    });
+    Object.assign(out, buildFaces(out.cx, out.cy, iv, r, n, rot, progress));
+  }
+  return out;
+}
+
+// ---- pieces: crossings of the arcs, the planar arrangement, and its faces (port of pieces_fast + faces) ----
+const FACE_ARC_LIMIT = 400000;
+let wantFaces = true;
+function buildFaces(cx, cy, iv, r, n, rot, progress) {
+  const ai = [], as = [], ae = [];
+  for (let i = 0; i < iv.length; i++) {
+    const l = iv[i];
+    // rejoin an arc split at the 0 / 2pi seam, so the seam leaves no artificial vertex (a turn would move it)
+    const wrap = l.length >= 2 && l[0][0] === 0 && l[l.length - 1][1] === TAU;
+    for (let j = wrap ? 1 : 0; j < (wrap ? l.length - 1 : l.length); j++) { ai.push(i); as.push(l[j][0]); ae.push(l[j][1]); }
+    if (wrap) { ai.push(i); as.push(l[l.length - 1][0]); ae.push(TAU + l[0][1]); }
+  }
+  const NA = ai.length;
+  const full = new Uint8Array(NA);
+  for (let k = 0; k < NA; k++) full[k] = ae[k] - as[k] >= TAU - 1e-12 ? 1 : 0;
+  if (progress) progress(-1, 0, 0, "finding crossings");
+  // short sub-arcs with bounding discs, bucketed on a grid of cell size >= any disc diameter
+  const DELTA = 0.05;
+  let NS = 0;
+  for (let k = 0; k < NA; k++) NS += Math.max(1, Math.ceil((ae[k] - as[k]) / DELTA));
+  const sArc = new Int32Array(NS), sS = new Float64Array(NS), sSpan = new Float64Array(NS),
+        sX = new Float64Array(NS), sY = new Float64Array(NS), sR = new Float64Array(NS);
+  let q = 0, maxR = 0;
+  for (let k = 0; k < NA; k++) {
+    const kk = Math.max(1, Math.ceil((ae[k] - as[k]) / DELTA)), sp = (ae[k] - as[k]) / kk;
+    for (let j = 0; j < kk; j++, q++) {
+      const s = as[k] + j * sp, m = s + sp / 2;
+      sArc[q] = k; sS[q] = s; sSpan[q] = sp;
+      sX[q] = cx[ai[k]] + r * Math.cos(m); sY[q] = cy[ai[k]] + r * Math.sin(m);
+      sR[q] = r * sp / 2 * 1.0001 + 1e-9;
+      if (sR[q] > maxR) maxR = sR[q];
+    }
+  }
+  const h = 2 * maxR, x0 = -1 - r - h, y0 = -r - h;
+  const GW = Math.ceil((2 + 2 * r + 2 * h) / h) + 2;
+  const cellOf = new Int32Array(NS);
+  for (let s = 0; s < NS; s++) cellOf[s] = Math.floor((sX[s] - x0) / h) * GW + Math.floor((sY[s] - y0) / h);
+  const order = new Int32Array(NS).map((_, i) => i).sort((a, b) => cellOf[a] - cellOf[b]);
+  const cellStart = new Map();
+  for (let p = 0; p < NS; p++) if (p === 0 || cellOf[order[p]] !== cellOf[order[p - 1]]) cellStart.set(cellOf[order[p]], p);
+  const tol = 1e-9;
+  const within = (t, s) => { const lo = sS[s] - tol; return ((t - lo) % TAU + TAU) % TAU <= sSpan[s] + 2 * tol; };
+  const PA = [], PT = [];
+  for (let a = 0; a < NS; a++) {
+    const ca = cellOf[a], ia = ai[sArc[a]];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      const c = ca + dx * GW + dy;
+      let p = cellStart.get(c);
+      if (p === undefined) continue;
+      for (; p < NS && cellOf[order[p]] === c; p++) {
+        const b = order[p];
+        if (b <= a) continue;
+        const ib = ai[sArc[b]];
+        if (ia === ib || Math.hypot(sX[a] - sX[b], sY[a] - sY[b]) > sR[a] + sR[b]) continue;
+        const ddx = cx[ib] - cx[ia], ddy = cy[ib] - cy[ia], dist = Math.hypot(ddx, ddy);
+        if (dist >= 2 * r - 1e-12) continue;
+        const hh = Math.acos(dist / (2 * r)), m = Math.atan2(ddy, ddx);
+        for (const sg of [1, -1]) {
+          const ti = m + sg * hh, px = cx[ia] + r * Math.cos(ti), py = cy[ia] + r * Math.sin(ti);
+          const tj = Math.atan2(py - cy[ib], px - cx[ib]);
+          if (within(ti, a) && within(tj, b)) {
+            PA.push(sArc[a], sArc[b]);
+            PT.push(((ti % TAU) + TAU) % TAU, ((tj % TAU) + TAU) % TAU);
+          }
+        }
+      }
+    }
+  }
+  for (let k = 0; k < NA; k++) if (!full[k]) { PA.push(k, k); PT.push(as[k], ae[k]); }
+  const NP = PA.length;
+  const pt = new Float64Array(NP), pa = Int32Array.from(PA);
+  for (let i = 0; i < NP; i++) {
+    let t = PT[i];
+    const k = pa[i];
+    if (t < as[k] - 1e-6 && t + TAU <= ae[k] + 1e-6) t += TAU;
+    pt[i] = Math.min(ae[k], Math.max(as[k], t));
+  }
+  // identify coincident points: hash grid of cell 1e-8, tolerance 1e-10
+  if (progress) progress(-1, 0, 0, "joining crossings");
+  const EPS_PT = 1e-10, CELL = 1e-8;
+  let size = 1; while (size < 2 * NP) size <<= 1;
+  const head = new Int32Array(size).fill(-1), nextV = [], vx = [], vy = [], vkx = [], vky = [];
+  const vid = new Int32Array(NP);
+  const hsh = (kx, ky) => (Math.imul(kx, 73856093) ^ Math.imul(ky, 19349663)) & (size - 1);
+  for (let i = 0; i < NP; i++) {
+    const k = pa[i], x = cx[ai[k]] + r * Math.cos(pt[i]), y = cy[ai[k]] + r * Math.sin(pt[i]);
+    const kx = Math.floor(x / CELL), ky = Math.floor(y / CELL);
+    let found = -1;
+    for (let dx = -1; dx <= 1 && found < 0; dx++) for (let dy = -1; dy <= 1 && found < 0; dy++) {
+      for (let v = head[hsh(kx + dx, ky + dy)]; v >= 0; v = nextV[v]) {
+        if (vkx[v] === kx + dx && vky[v] === ky + dy && Math.abs(vx[v] - x) < EPS_PT && Math.abs(vy[v] - y) < EPS_PT) { found = v; break; }
+      }
+    }
+    if (found < 0) {
+      found = vx.length;
+      vx.push(x); vy.push(y); vkx.push(kx); vky.push(ky);
+      const hk = hsh(kx, ky);
+      nextV.push(head[hk]); head[hk] = found;
+    }
+    vid[i] = found;
+  }
+  const V = vx.length;
+  // walk each arc in angle order: counting sort by arc, then by angle within each arc
+  const cnt = new Int32Array(NA + 1);
+  for (let i = 0; i < NP; i++) cnt[pa[i] + 1]++;
+  for (let k = 0; k < NA; k++) cnt[k + 1] += cnt[k];
+  const byArc = new Int32Array(NP), fill = cnt.slice(0, NA);
+  for (let i = 0; i < NP; i++) byArc[fill[pa[i]]++] = i;
+  const EU = [], EV = [], EC = [], E0 = [], E1 = [];
+  for (let k = 0; k < NA; k++) {
+    const seg = Array.from(byArc.subarray(cnt[k], cnt[k + 1])).sort((a, b) => pt[a] - pt[b]);
+    const sv = [], st = [];
+    for (const i of seg) if (!sv.length || sv[sv.length - 1] !== vid[i]) { sv.push(vid[i]); st.push(pt[i]); }
+    if (full[k]) {
+      if (sv.length > 1 && sv[0] === sv[sv.length - 1]) { sv.pop(); st.pop(); }
+      if (!sv.length) continue;
+      sv.push(sv[0]); st.push(st[0] + TAU);
+    }
+    for (let j = 0; j + 1 < sv.length; j++) { EU.push(sv[j]); EV.push(sv[j + 1]); EC.push(ai[k]); E0.push(st[j]); E1.push(st[j + 1]); }
+  }
+  const NE = EU.length;
+  // half-edges: 2k leaves EU[k] forwards (ccw along its circle), 2k+1 leaves EV[k] backwards; sort around each vertex
+  if (progress) progress(-1, 0, 0, "tracing pieces");
+  const deg = new Int32Array(V + 1);
+  for (let k = 0; k < NE; k++) { deg[EU[k] + 1]++; deg[EV[k] + 1]++; }
+  for (let v = 0; v < V; v++) deg[v + 1] += deg[v];
+  // sort key: departure direction, ties broken by curvature (-1 before +1), as in twodisk.py faces()
+  const outH = new Int32Array(2 * NE), outKey = new Float64Array(2 * NE), outK = new Int8Array(2 * NE), slot = deg.slice(0, V);
+  const norm = t => ((t % TAU) + TAU) % TAU;
+  for (let k = 0; k < NE; k++) {
+    let p = slot[EU[k]]++; outH[p] = 2 * k; outKey[p] = norm(E0[k] + Math.PI / 2); outK[p] = 1;
+    p = slot[EV[k]]++; outH[p] = 2 * k + 1; outKey[p] = norm(E1[k] - Math.PI / 2); outK[p] = -1;
+  }
+  const pos = new Int32Array(2 * NE);
+  for (let v = 0; v < V; v++) {
+    const a = deg[v], b = deg[v + 1];
+    for (let i = a + 1; i < b; i++) {            // insertion sort (degrees are small)
+      const hk = outH[i], kk = outKey[i], ck = outK[i];
+      let j = i - 1;
+      while (j >= a && (outKey[j] > kk || (outKey[j] === kk && outK[j] > ck))) {
+        outH[j + 1] = outH[j]; outKey[j + 1] = outKey[j]; outK[j + 1] = outK[j]; j--;
+      }
+      outH[j + 1] = hk; outKey[j + 1] = kk; outK[j + 1] = ck;
+    }
+    for (let i = a; i < b; i++) pos[outH[i]] = i;
+  }
+  const tail = hh => (hh & 1) ? EV[hh >> 1] : EU[hh >> 1];
+  const areaOf = hh => {
+    const k = hh >> 1, c = EC[k], t0 = E0[k], t1 = E1[k];
+    const a = 0.5 * (r * cx[c] * (Math.sin(t1) - Math.sin(t0)) - r * cy[c] * (Math.cos(t1) - Math.cos(t0)) + r * r * (t1 - t0));
+    return (hh & 1) ? -a : a;
+  };
+  const faceOf = new Int32Array(2 * NE).fill(-1);
+  const FS = [0], FH = [];
+  let outer = 0;
+  for (let h0 = 0; h0 < 2 * NE; h0++) {
+    if (faceOf[h0] !== -1) continue;
+    let hh = h0, area = 0;
+    const start = FH.length;
+    while (faceOf[hh] === -1) {
+      faceOf[hh] = -2; FH.push(hh); area += areaOf(hh);
+      const tw = hh ^ 1, v = tail(tw), i = pos[tw];
+      hh = outH[i === deg[v] ? deg[v + 1] - 1 : i - 1];
+    }
+    if (area > 0) {
+      const f = FS.length - 1;
+      for (let i = start; i < FH.length; i++) faceOf[FH[i]] = f;
+      FS.push(FH.length);
+    } else {                                     // the outer face: drop it
+      for (let i = start; i < FH.length; i++) faceOf[FH[i]] = -3;
+      FH.length = start; outer++;
+    }
+  }
+  const NF = FS.length - 1;
+  // disk membership and bounding box of each piece
+  const FM = new Uint8Array(NF), FB = new Float64Array(4 * NF);
+  const inside = (x, y, ox) => (x - ox) ** 2 + y * y <= r * r * (1 + 1e-9);
+  for (let f = 0; f < NF; f++) {
+    let mA = 1, mB = 1, xl = Infinity, xh = -Infinity, yl = Infinity, yh = -Infinity;
+    for (let i = FS[f]; i < FS[f + 1]; i++) {
+      const k = FH[i] >> 1, c = EC[k], t0 = E0[k], t1 = E1[k], tm = (t0 + t1) / 2;
+      const mx = cx[c] + r * Math.cos(tm), my = cy[c] + r * Math.sin(tm);
+      if (!inside(mx, my, -1)) mA = 0;
+      if (!inside(mx, my, 1)) mB = 0;
+      const pts = [t0, t1];
+      for (let a = Math.ceil(t0 / (Math.PI / 2)) * (Math.PI / 2); a < t1; a += Math.PI / 2) pts.push(a);
+      for (const t of pts) {
+        const x = cx[c] + r * Math.cos(t), y = cy[c] + r * Math.sin(t);
+        if (x < xl) xl = x; if (x > xh) xh = x; if (y < yl) yl = y; if (y > yh) yh = y;
+      }
+    }
+    FM[f] = mA | (mB << 1);
+    FB[4 * f] = xl; FB[4 * f + 1] = yl; FB[4 * f + 2] = xh; FB[4 * f + 3] = yh;
+  }
+  // where each piece goes when a disk turns by +1/n: map one boundary edge to its image edge
+  const byCircle = new Map();                    // circle -> edge indices sorted by start angle (mod 2pi)
+  for (let k = 0; k < NE; k++) { const l = byCircle.get(EC[k]); if (l) l.push(k); else byCircle.set(EC[k], [k]); }
+  for (const l of byCircle.values()) l.sort((a, b) => norm(E0[a]) - norm(E0[b]));
+  const step = TAU / n;
+  const perm = [0, 1].map(d => {
+    const P = new Int32Array(NF).fill(-1), bit = 1 << d;
+    for (let f = 0; f < NF; f++) {
+      if (!(FM[f] & bit)) continue;
+      // use an edge off the turning disk's own rim: cuts outside the disk split the rim at points a turn moves
+      let hh = -1;
+      for (let i = FS[f]; i < FS[f + 1]; i++) if (EC[FH[i] >> 1] !== d) { hh = FH[i]; break; }
+      if (hh < 0) continue;
+      const k = hh >> 1, j = rot[d][EC[k]];
+      if (j < 0) continue;
+      const l = byCircle.get(j);
+      if (!l) continue;
+      const want = norm(E0[k] + step), len = E1[k] - E0[k];
+      let lo = 0, hi = l.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (norm(E0[l[mid]]) < want - 1e-9) lo = mid + 1; else hi = mid; }
+      for (const cand of [lo, lo - 1, 0, l.length - 1]) {
+        const e = l[cand];
+        if (e === undefined) continue;
+        let dd = Math.abs(norm(E0[e]) - want); dd = Math.min(dd, TAU - dd);
+        if (dd < 1e-9 && Math.abs((E1[e] - E0[e]) - len) < 1e-9) { P[f] = faceOf[2 * e + (hh & 1)]; break; }
+      }
+    }
+    return P;
+  });
+  return { EC: Int32Array.from(EC), E0: Float64Array.from(E0), E1: Float64Array.from(E1), FS: Int32Array.from(FS),
+           FH: Int32Array.from(FH), FM, FB, PA: perm[0], PB: perm[1], pieces: NF, outer, vertices: V };
 }
 
 if (typeof self !== "undefined" && typeof window === "undefined" && typeof module === "undefined") {
   self.onmessage = ev => {
     const { n, r, budget, id } = ev.data;
     const t0 = performance.now();
-    const res = solve(n, r, budget, (c, p, g) => self.postMessage({ id, progress: true, circles: c, cuts: p, gen: g }));
+    wantFaces = ev.data.faces !== false;
+    const res = solve(n, r, budget, (c, p, g, phase) => self.postMessage({ id, progress: true, circles: c, cuts: p, gen: g, phase }));
     res.ms = performance.now() - t0;
     res.id = id;
-    self.postMessage(res, [res.cx.buffer, res.cy.buffer, res.pc.buffer, res.ps.buffer, res.pe.buffer, res.pg.buffer]);
+    const bufs = ["cx", "cy", "pc", "ps", "pe", "pg", "EC", "E0", "E1", "FS", "FH", "FM", "FB", "PA", "PB"]
+      .filter(k => res[k]).map(k => res[k].buffer);
+    self.postMessage(res, bufs);
   };
 }
 if (typeof module !== "undefined") module.exports = { solve, cyclo };
@@ -408,7 +664,7 @@ function compute() {
   job++;
   $("busy").classList.add("on");
   $("busytext").textContent = `computing n = ${n}…`;
-  freshWorker().postMessage({ n, r, budget: +$("budget").value, id: job });
+  freshWorker().postMessage({ n, r, budget: +$("budget").value, id: job, faces: $("mode").value === "pieces" });
   busy = true;
   location.hash = `n=${n}&r=${r}`;
 }
@@ -416,7 +672,10 @@ function compute() {
 function onResult(ev) {
   const d = ev.data;
   if (d.id !== job) return;
-  if (d.progress) { $("busytext").textContent = `${fmt(d.circles)} circles · ${fmt(d.cuts)} cuts · generation ${d.gen}`; return; }
+  if (d.progress) {
+    $("busytext").textContent = d.phase ? `${d.phase}…` : `${fmt(d.circles)} circles · ${fmt(d.cuts)} cuts · generation ${d.gen}`;
+    return;
+  }
   busy = false;
   $("busy").classList.remove("on");
   const n = +$("n").value, r = +$("r").value;
@@ -432,10 +691,20 @@ function onResult(ev) {
   const tot = m - cnt[0];
   for (let g = 1, acc = 0; g <= maxGen; g++) { S.bucket[g] = Math.min(K - 1, Math.floor(K * acc / Math.max(1, tot))); acc += cnt[g]; }
   splitByDisks();
+  S.cx = d.cx; S.cy = d.cy;
+  if (d.FS) {
+    S.F = { EC: d.EC, E0: d.E0, E1: d.E1, FS: d.FS, FH: d.FH, FM: d.FM, FB: d.FB, PA: d.PA, PB: d.PB, NF: d.pieces };
+    // colour: family by starting disk (A only, B only, both), shade by a hash of the piece
+    S.col = new Uint8Array(d.pieces);
+    for (let f = 0; f < d.pieces; f++) S.col[f] = 5 * ([0, 0, 1, 2][d.FM[f]]) + (Math.imul(f + 1, 2654435761) >>> 0) % 5;
+  }
   const a = A_N[n - 3];
   const plateau = a && $("preset").value === "plateau";
-  $("info").innerHTML = `<b>n = ${n}</b>, <b>r = ${+r.toPrecision(9)}</b>: ${fmt(d.circles)} circles, ${fmt(d.arcs)} arcs, ` +
-    `${maxGen} generations` + (plateau ? `, <b>${fmt(a)}</b> pieces (the plateau value a(${n}))` : "") +
+  const pc = d.FS ? `, <b>${fmt(d.pieces)}</b> pieces` + (plateau ? (d.pieces === a ? ` (= a(${n}), the plateau value)` :
+    ` (a(${n}) is ${fmt(a)})`) : "") : (plateau ? `, a(${n}) = <b>${fmt(a)}</b> pieces` : "");
+  $("info").innerHTML = `<b>n = ${n}</b>, <b>r = ${+r.toPrecision(9)}</b>: ${fmt(d.circles)} circles, ${fmt(d.arcs)} arcs` +
+    pc + `, ${maxGen} generations` +
+    (!d.FS && $("mode").value === "pieces" ? " · too many cuts to trace the pieces; showing cuts" : "") +
     (d.truncated ? ` · <b>stopped at the budget</b>: the cuts go on (a fractal), this is ${maxGen} generations deep` : "") +
     ` · ${(d.ms / 1000).toFixed(1)} s`;
   $("rampmax").textContent = `generation ${maxGen}`;
@@ -489,6 +758,78 @@ function resetView() {
   draw();
 }
 
+// Piece colours: three families by where a piece starts (disk A only, disk B only, the shared lens), five shades
+// each. Pieces keep their colour as the disks turn, so the families mix.
+const FAMILY = [[[150, 206, 204], [164, 190, 226], [134, 212, 186], [186, 196, 232], [120, 190, 214]],
+                [[241, 206, 140], [233, 180, 120], [247, 222, 170], [236, 160, 128], [245, 196, 110]],
+                [[214, 176, 226], [196, 168, 232], [228, 184, 212], [182, 210, 158], [206, 196, 240]]];
+const FAMILY_DARK = [[[34, 92, 98], [44, 74, 110], [30, 104, 84], [60, 80, 120], [38, 96, 118]],
+                     [[122, 86, 40], [150, 104, 46], [104, 74, 52], [140, 82, 60], [112, 98, 44]],
+                     [[92, 62, 116], [74, 64, 124], [114, 66, 104], [70, 100, 62], [86, 78, 128]]];
+const pieceColors = () => (dark() ? FAMILY_DARK : FAMILY).flat().map(([a, b, c]) => `rgb(${a},${b},${c})`);
+const showPieces = () => $("mode").value === "pieces" && S && S.F && growGen === null;
+
+let V;   // per-frame view: {sc, vx, vy, W2, H2, rho, dt}
+// Append the arc of circle (x, y, r) from angle ta to tb (either direction) to path, in screen coordinates. Inside
+// the view the chord stays within 1/4 px of the arc; outside it the steps grow geometrically away from the view, so
+// even at deep zoom a long boundary arc costs a few dozen points and never cuts through the visible region.
+function emitArc(path, x, y, r, ta, tb, first) {
+  const sg = tb >= ta ? 1 : -1, span = Math.abs(tb - ta);
+  const dxv = V.vx - x, dyv = V.vy - y, d = Math.hypot(dxv, dyv);
+  let ua = 0, ub = span;
+  if (V.rho < r && d > 1e-300) {
+    const m = Math.atan2(dyv, dxv);
+    let uc = sg * (m - ta);
+    uc = uc - TAU * Math.round((uc - span / 2) / TAU);     // the representative nearest the arc
+    const c = (d * d + r * r - V.rho * V.rho) / (2 * d * r);
+    const hw = c >= 1 ? 0 : Math.acos(Math.max(-1, c));
+    ua = Math.max(0, uc - hw); ub = Math.min(span, uc + hw);
+    if (ua > ub) { ua = ub = Math.min(span, Math.max(0, uc)); }
+  }
+  const dt = V.dt, us = [];
+  for (let u = ua, s = dt; u > 0; s *= 2) { u = Math.max(0, u - s); us.push(u); }
+  us.reverse();
+  const nmid = Math.min(20000, Math.max(1, Math.ceil((ub - ua) / dt)));
+  for (let q = 0; q <= nmid; q++) us.push(ua + (ub - ua) * q / nmid);
+  for (let u = ub, s = dt; u < span; s *= 2) { u = Math.min(span, u + s); us.push(u); }
+  const bx = (x - V.vx) * V.sc + V.W2, by = (V.vy - y) * V.sc + V.H2, R = r * V.sc, L = 1e7;
+  for (let q = 0; q < us.length; q++) {
+    const t = ta + sg * us[q];
+    const px = Math.max(-L, Math.min(L, bx + R * Math.cos(t))), py = Math.max(-L, Math.min(L, by - R * Math.sin(t)));
+    if (first && q === 0) path.moveTo(px, py); else path.lineTo(px, py);
+  }
+}
+
+function drawPieces(th, mdisk, cth, sth) {
+  const F = S.F, r = S.r, cols = pieceColors();
+  const paths = cols.map(() => new Path2D());
+  const xl = V.vx - V.W2 / V.sc, xh = V.vx + V.W2 / V.sc, yl = V.vy - V.H2 / V.sc, yh = V.vy + V.H2 / V.sc;
+  const minPx = 0.4 / V.sc;
+  for (let f = 0; f < F.NF; f++) {
+    let bx0 = F.FB[4 * f], by0 = F.FB[4 * f + 1], bx1 = F.FB[4 * f + 2], by1 = F.FB[4 * f + 3];
+    const moving = mdisk && (F.FM[f] & mdisk);
+    if (bx1 - bx0 < minPx && by1 - by0 < minPx) continue;
+    if (moving) {          // rotate the box's centre; its half-diagonal bounds the rotated box
+      const ox = mdisk === 1 ? -1 : 1, cxb = (bx0 + bx1) / 2 - ox, cyb = (by0 + by1) / 2, hr = Math.hypot(bx1 - bx0, by1 - by0) / 2;
+      const nx = ox + cxb * cth - cyb * sth, ny = cxb * sth + cyb * cth;
+      bx0 = nx - hr; bx1 = nx + hr; by0 = ny - hr; by1 = ny + hr;
+    }
+    if (bx1 < xl || bx0 > xh || by1 < yl || by0 > yh) continue;
+    const path = paths[S.col[f]];
+    for (let i = F.FS[f]; i < F.FS[f + 1]; i++) {
+      const hh = F.FH[i], k = hh >> 1, c = F.EC[k];
+      let x = S.cx[c], y = S.cy[c], t0 = F.E0[k], t1 = F.E1[k];
+      if (moving) {
+        const ox = mdisk === 1 ? -1 : 1, dx = x - ox;
+        x = ox + dx * cth - y * sth; y = dx * sth + y * cth; t0 += th; t1 += th;
+      }
+      if (hh & 1) emitArc(path, x, y, r, t1, t0, i === F.FS[f]); else emitArc(path, x, y, r, t0, t1, i === F.FS[f]);
+    }
+    path.closePath();
+  }
+  for (let q = 0; q < cols.length; q++) { ctx.fillStyle = cols[q]; ctx.fill(paths[q]); }
+}
+
 function draw() {
   const W = cv.width, H = cv.height, dpr = cv.width / cv.clientWidth;
   const css = getComputedStyle(document.documentElement);
@@ -499,15 +840,18 @@ function draw() {
   if (!S) return;
   const sc = view.s * dpr, r = S.r, vx = view.x, vy = view.y;
   const rho = Math.hypot(W, H) / 2 / sc;
+  V = { sc, vx, vy, W2: W / 2, H2: H / 2, rho, dt: 2 * Math.sqrt(0.5 / (r * sc)) };
+  const pieces = showPieces();
   const cols = ramp(), K = cols.length;
   const paths = cols.map(() => new Path2D());
-  const ink = new Path2D();
+  const ink = new Path2D(), plain = new Path2D();
   let th = 0, mdisk = 0, cth = 1, sth = 0;
   if (anim) {
     const u = Math.min(1, (performance.now() - anim.t0) / anim.dur);
     th = anim.dir * (TAU / S.n) * (u < .5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u));
     mdisk = anim.disk; cth = Math.cos(th); sth = Math.sin(th);
   }
+  if (pieces) drawPieces(th, mdisk, cth, sth);
   const lim = growGen ?? Infinity;
   const W2 = W / 2, H2 = H / 2;
   for (let k = 0; k < S.s.length; k++) {
@@ -533,8 +877,8 @@ function draw() {
         }
       }
     }
-    const path = g === 0 ? ink : paths[S.bucket[g]];
-    const dt = 2 * Math.sqrt(0.5 / (r * sc));   // keeps the chord within ~1/4 px of the arc
+    const path = g === 0 ? ink : pieces ? plain : paths[S.bucket[g]];
+    const dt = V.dt;                             // keeps the chord within ~1/4 px of the arc
     const bx = (x - vx) * sc + W2, by = (vy - y) * sc + H2;
     for (const [t0, t1] of wins) {
       const L = r * (t1 - t0) * sc;
@@ -550,6 +894,11 @@ function draw() {
   ctx.lineCap = "round";
   ctx.lineWidth = Math.max(1, 0.9 * dpr);
   for (let q = K - 1; q >= 0; q--) { ctx.strokeStyle = cols[q]; ctx.stroke(paths[q]); }
+  if (pieces) {
+    ctx.globalAlpha = 0.55; ctx.lineWidth = Math.max(0.8, 0.7 * dpr);
+    ctx.strokeStyle = css.getPropertyValue("--fg").trim(); ctx.stroke(plain);
+    ctx.globalAlpha = 1;
+  }
   ctx.lineWidth = 1.6 * dpr;
   ctx.strokeStyle = css.getPropertyValue("--fg").trim();
   ctx.stroke(ink);
@@ -583,6 +932,13 @@ function finishTurn() {
     S.x[k] = ox + dx * c - y * s; S.y[k] = dx * s + y * c;
     const len = S.e[k] - S.s[k];
     S.s[k] = (((S.s[k] + th) % TAU) + TAU) % TAU; S.e[k] = S.s[k] + len;
+  }
+  if (S.F) {   // pieces map onto pieces: carry each colour to where its piece went
+    const P = D === 1 ? S.F.PA : S.F.PB, old = S.col.slice();
+    for (let f = 0; f < S.F.NF; f++) {
+      if (!(S.F.FM[f] & D) || P[f] < 0) continue;
+      if (anim.dir > 0) S.col[P[f]] = old[f]; else S.col[f] = old[P[f]];
+    }
   }
   anim = null;
   splitByDisks();   // membership changes after a turn
@@ -690,7 +1046,18 @@ $("rslide").onchange = () => compute();
 $("go").onclick = compute;
 $("speed").onchange = () => { if ($("grow").getAttribute("aria-pressed") === "true") { $("grow").click(); $("grow").click(); } };
 
-function paintRamp() { $("rampbar").style.background = `linear-gradient(90deg, ${ramp().join(",")})`; }
+function paintRamp() {
+  $("rampbar").style.background = `linear-gradient(90deg, ${ramp().join(",")})`;
+  const cols = pieceColors();
+  $("swatches").innerHTML = ["left disk", "right disk", "lens"].map((name, fam) =>
+    `<span class="sw">${cols.slice(5 * fam, 5 * fam + 5).map(c => `<i style="background:${c}"></i>`).join("")}<b>${name}</b></span>`).join("");
+}
+function showKey() {
+  const pieces = $("mode").value === "pieces";
+  $("key-pieces").hidden = !pieces; $("key-cuts").hidden = pieces;
+}
+$("mode").onchange = () => { showKey(); if ($("mode").value === "pieces" && S && !S.F) compute(); else draw(); };
+showKey();
 paintRamp();
 $("seq").textContent = A_N.length ? A_N.join(", ") : "";
 

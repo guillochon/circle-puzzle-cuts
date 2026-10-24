@@ -13,8 +13,9 @@ critical radius, a fractal (drawn to a budget) above it.
   shortest arc (about 2.5·10⁻⁶ at n = 200).
 - **Animation.** "Turn the disks" alternates turns of the two disks; on a finite puzzle each turn maps the cuts onto
   themselves while the generation colours travel. "Grow by generation" reveals the cuts in the order they are made.
-- **Colours.** A cut's generation is the number of turns it took to make it from the disk boundaries; colours are
-  quantiles of the generation.
+- **Colours.** Every piece is filled with its own shade, from three families: pieces that start in the left disk only,
+  the right disk only, or the lens they share. A turn carries each colour to where its piece goes, so the families
+  mix. "Cuts by generation" instead colours each cut by the number of turns it took to make it.
 
 ## How it works
 
@@ -26,6 +27,11 @@ Everything runs in the browser, in one file (`index.html`); the computation runs
   turn maps ends to ends and every angle is recomputed from exact centres; no round-off accumulates. It is a port of
   `ExactPuzzle` in `attacks/circle_puzzles/twodisk.py` and reproduces its circle and arc counts exactly
   (n = 200: 39,604 circles, 78,805 arcs, about 1.5 s).
+- **Pieces.** The worker also finds every crossing (sub-arcs on a grid), joins coincident points, and traces every
+  face of the arrangement (half-edges sorted by direction and curvature, as in `twodisk.py`). The piece count is
+  therefore computed live and independently of the Python table: n = 200 gives 1,094,205 = a(200) in about 6 s. A
+  turn maps pieces to pieces; the page finds that permutation by matching one edge of each piece (off the turning
+  disk's rim) to its rotated image, and checks it is a bijection.
 - **Drawing.** Canvas 2D, with the view transform done in double precision and each arc clipped to the view and
   sampled so the chord stays within a quarter pixel, so lines stay sharp at any zoom.
 
