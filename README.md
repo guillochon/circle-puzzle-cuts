@@ -26,6 +26,12 @@ critical radius, a fractal (drawn to a budget) above it.
   the right disk only, or the lens they share. A turn carries each colour to where its piece goes, so the families
   mix. "Cuts by generation" instead colours each cut by the number of turns it took to make it.
 
+- **A Penrose plane.** A second section embeds `penrose.html`: disks on the five-fold vertices of a Penrose rhomb
+  tiling, turning by 72° (n = 5), with the tile edges as cuts too. Its cuts close up below a radius of about φ and
+  grow into a fractal above (measured within about 0.003 of φ). In the two-disk units (centres 2 apart) that
+  threshold is 2/φ = √5 − 1 = sec(π/5), exactly where the two-disk n = 5 puzzle jumps from 11 to 169 pieces; buttons
+  beside it set up that two-disk puzzle. `penrose.html` also works on its own.
+
 ## How it works
 
 Everything runs in the browser, in one file (`index.html`); the computation runs in a Web Worker.

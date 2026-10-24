@@ -88,6 +88,16 @@ button:disabled { opacity: .45; cursor: default; }
 .key[hidden] { display: none; }
 .ink { display: inline-block; width: 22px; height: 0; border-top: 2px solid var(--fg); vertical-align: middle; }
 
+.plane { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.45fr); gap: 18px 32px; align-items: start;
+  border-top: 1px solid var(--line); padding-top: 20px; }
+.plane-text p { margin: 0 0 10px; color: var(--muted); max-width: 62ch; }
+.plane-text p b { color: var(--fg); font-weight: 500; }
+.plane-links { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.plane-links button { text-align: left; }
+#penrose-frame { width: 100%; height: 1100px; border: 0; display: block; background: transparent; }
+@media (max-width: 860px) { .plane { grid-template-columns: minmax(0, 1fr); } }
+.toplinks { font-family: var(--font-mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.toplinks a { color: var(--muted); }
 .text { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 32px; }
 .text p { margin: 0 0 10px; color: var(--muted); max-width: 70ch; }
 .text p b { color: var(--fg); font-weight: 500; }
@@ -99,6 +109,7 @@ footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--lin
   <header>
     <p class="eyebrow">Two-disk circle puzzles · compound symmetry groups GG<sub>n</sub></p>
     <h1>Circle Puzzle Cuts</h1>
+    <p class="toplinks"><a href="#stage">Two disks</a> · <a href="#penrose">A Penrose plane of disks</a></p>
     <p class="lede">Two overlapping disks of radius <b>r</b>, centred at ±1, each turn by <b>1/n</b> of a full turn.
       Every turn carries the cuts inside one disk somewhere new, and they cut again. The drawing shows <b>all</b> the
       cuts this ever makes: a finite puzzle below the critical radius, a fractal above it. Everything is computed in
@@ -155,6 +166,26 @@ footer { font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--lin
     <span class="ramp">generation 1 <span class="bar" id="rampbar"></span> <span id="rampmax">last</span></span>
     <span>A cut's generation is how many turns it took to make it from the disk boundaries.</span>
   </div>
+
+  <section class="plane" id="penrose">
+    <div class="plane-text">
+      <h2>Many disks: a Penrose plane</h2>
+      <p>The same rule with a whole plane of disks. Disks sit on the five-fold vertices of a Penrose rhomb tiling
+        (edge 1, neighbouring five-fold vertices φ² ≈ 2.618 apart) and turn by 72°, the <b>n = 5</b> case of the puzzle
+        above; the tile edges are cuts too. Below a radius of about <b>φ</b> the cuts close up into a finite puzzle;
+        above it they keep multiplying into a fractal (measured to within about 0.003 of φ, not proved).</p>
+      <p>In the units used above, where two neighbouring centres are 2 apart, that threshold is r = 2φ/φ² = 2/φ =
+        <b>√5 − 1 = sec(π/5)</b>: exactly where the two-disk n = 5 puzzle jumps from 11 to 169 pieces, as copies of the
+        shared lens start to overlap. Two disks stay finite well beyond that, up to √(3 + φ) ≈ 2.149; a plane of
+        disks does not.</p>
+      <p class="plane-links">
+        <button type="button" data-goto="plateau">Two disks, n = 5, just past sec(π/5): 169 pieces</button>
+        <button type="button" data-goto="crit">Two disks, n = 5, at their critical radius √(3 + φ)</button>
+        <a href="penrose.html" target="_blank" rel="noopener">Open the Penrose plane on its own ↗</a>
+      </p>
+    </div>
+    <iframe id="penrose-frame" src="penrose.html" loading="lazy" scrolling="no" title="Penrose plane of turning disks"></iframe>
+  </section>
 
   <section class="text">
     <div>
@@ -1477,6 +1508,19 @@ $("rslide").oninput = () => { $("preset").value = "custom"; setR(1 + 10 ** +$("r
 $("rslide").onchange = () => compute();
 $("go").onclick = compute;
 $("speed").onchange = () => { if ($("grow").getAttribute("aria-pressed") === "true") { $("grow").click(); $("grow").click(); } };
+
+// the embedded Penrose page reports its height; the buttons beside it set up the matching two-disk puzzle
+addEventListener("message", ev => {
+  const fr = $("penrose-frame");
+  if (ev.source === fr.contentWindow && ev.data && ev.data.penroseHeight) fr.style.height = Math.ceil(ev.data.penroseHeight) + "px";
+});
+document.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () => {
+  $("n").value = 5; $("nslide").value = 5;
+  $("preset").value = b.dataset.goto;
+  applyPreset();
+  compute();
+  $("stage").scrollIntoView({ behavior: "smooth", block: "center" });
+}));
 
 function paintRamp() {
   $("rampbar").style.background = `linear-gradient(90deg, ${ramp().join(",")})`;
