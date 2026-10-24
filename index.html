@@ -744,7 +744,9 @@ function onResult(ev) {
     // colour: family by starting disk (A only, B only, both), shade by a hash of the piece
     S.col = new Uint8Array(d.pieces);
     for (let f = 0; f < d.pieces; f++) S.col[f] = 5 * ([0, 0, 1, 2][d.FM[f]]) + (Math.imul(f + 1, 2654435761) >>> 0) % 5;
+    indexPieces();
   }
+  colVersion++;
   const a = A_N[n - 3];
   const plateau = a && $("preset").value === "plateau";
   const pc = d.FS ? `, <b>${fmt(d.pieces)}</b> pieces` + (plateau ? (d.pieces === a ? ` (= a(${n}), the plateau value)` :
@@ -788,6 +790,7 @@ function splitByDisks() {
   }
   Object.assign(S, { x: Float64Array.from(X), y: Float64Array.from(Y), s: Float64Array.from(Sa), e: Float64Array.from(Ea),
                      g: Uint16Array.from(G), f: Uint8Array.from(F) });
+  indexCuts();
 }
 
 function size() {
@@ -817,180 +820,291 @@ const FAMILY_DARK = [[[34, 92, 98], [44, 74, 110], [30, 104, 84], [60, 80, 120],
 const pieceColors = () => (dark() ? FAMILY_DARK : FAMILY).flat().map(([a, b, c]) => `rgb(${a},${b},${c})`);
 const showPieces = () => $("mode").value === "pieces" && S && S.F && growGen === null;
 
-let V;   // per-frame view: {sc, vx, vy, W2, H2, rho, dt}
+let sel = -1, orbit = null, follow = false;    // selected piece, the slots it can reach, camera rides with it
+let V;   // the view being drawn: {sc (device px per unit), vx, vy, W2, H2, rho, dt, dpr, xl, xh, yl, yh}
+
+// ---- visibility index ----
+// Pieces and cuts are sorted by size, so a wide view only visits the ones at least a pixel across, and bucketed on
+// a grid, so a zoomed view only visits the ones near the screen. Built once per result (cuts: after every turn).
+function buildIndex(n, box, size, r) {
+  const order = new Int32Array(n).map((_, i) => i).sort((a, b) => size[b] - size[a]);
+  const sorted = new Float32Array(n);
+  for (let i = 0; i < n; i++) sorted[i] = size[order[i]];
+  const GX = 256, GY = 128, x0 = -1 - r, y0 = -r, cw = (2 + 2 * r) / GX, ch = (2 * r) / GY;
+  const cnt = new Int32Array(GX * GY + 1), big = [];
+  const cell = (k) => {
+    const i0 = Math.max(0, Math.floor((box[4 * k] - x0) / cw)), i1 = Math.min(GX - 1, Math.floor((box[4 * k + 2] - x0) / cw));
+    const j0 = Math.max(0, Math.floor((box[4 * k + 1] - y0) / ch)), j1 = Math.min(GY - 1, Math.floor((box[4 * k + 3] - y0) / ch));
+    return [i0, i1, j0, j1];
+  };
+  const spans = new Int32Array(4 * n);
+  for (let k = 0; k < n; k++) {
+    const [i0, i1, j0, j1] = cell(k);
+    spans.set([i0, i1, j0, j1], 4 * k);
+    if ((i1 - i0 + 1) * (j1 - j0 + 1) > 64) { big.push(k); continue; }
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) cnt[i * GY + j + 1]++;
+  }
+  for (let c = 0; c < GX * GY; c++) cnt[c + 1] += cnt[c];
+  const items = new Int32Array(cnt[GX * GY]), fill = cnt.slice(0, GX * GY);
+  for (let k = 0; k < n; k++) {
+    const i0 = spans[4 * k], i1 = spans[4 * k + 1], j0 = spans[4 * k + 2], j1 = spans[4 * k + 3];
+    if ((i1 - i0 + 1) * (j1 - j0 + 1) > 64) continue;
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) items[fill[i * GY + j]++] = k;
+  }
+  return { n, box, size, order, sorted, GX, GY, x0, y0, cw, ch, start: cnt, items, big: Int32Array.from(big),
+           stamp: new Int32Array(n), stampId: 0, out: new Int32Array(1024) };
+}
+// Items whose box meets the rectangle and whose size is at least minSize. Returns [list, count].
+function query(ix, xl, xh, yl, yh, minSize) {
+  const W = 2 + 2 * S.r, H = 2 * S.r;
+  const fx = Math.max(0, Math.min(xh, ix.x0 + W) - Math.max(xl, ix.x0)), fy = Math.max(0, Math.min(yh, ix.y0 + H) - Math.max(yl, ix.y0));
+  if (fx * fy > 0.25 * W * H) {      // a wide view: the size-sorted prefix is the cheaper candidate list
+    let lo = 0, hi = ix.n;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (ix.sorted[m] >= minSize) lo = m + 1; else hi = m; }
+    return [ix.order, lo];
+  }
+  const id = ++ix.stampId;
+  let out = ix.out, k = 0;
+  const push = (it) => {
+    if (ix.stamp[it] === id || ix.size[it] < minSize) return;
+    ix.stamp[it] = id;
+    if (k === out.length) { const g = new Int32Array(out.length * 2); g.set(out); out = ix.out = g; }
+    out[k++] = it;
+  };
+  const i0 = Math.max(0, Math.floor((xl - ix.x0) / ix.cw)), i1 = Math.min(ix.GX - 1, Math.floor((xh - ix.x0) / ix.cw));
+  const j0 = Math.max(0, Math.floor((yl - ix.y0) / ix.ch)), j1 = Math.min(ix.GY - 1, Math.floor((yh - ix.y0) / ix.ch));
+  for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+    const c = i * ix.GY + j;
+    for (let p = ix.start[c]; p < ix.start[c + 1]; p++) push(ix.items[p]);
+  }
+  for (const it of ix.big) push(it);
+  return [out, k];
+}
+function indexPieces() {
+  const F = S.F, size = new Float32Array(F.NF);
+  for (let f = 0; f < F.NF; f++) size[f] = Math.max(F.FB[4 * f + 2] - F.FB[4 * f], F.FB[4 * f + 3] - F.FB[4 * f + 1]);
+  F.ix = buildIndex(F.NF, F.FB, size, S.r);
+}
+function indexCuts() {        // a cut's box: around its midpoint, half its length either way
+  const m = S.s.length, box = new Float64Array(4 * m), size = new Float32Array(m), r = S.r;
+  for (let k = 0; k < m; k++) {
+    const t = (S.s[k] + S.e[k]) / 2, half = r * (S.e[k] - S.s[k]) / 2;
+    const x = S.x[k] + r * Math.cos(t), y = S.y[k] + r * Math.sin(t);
+    box[4 * k] = x - half; box[4 * k + 1] = y - half; box[4 * k + 2] = x + half; box[4 * k + 3] = y + half;
+    size[k] = 2 * half;
+  }
+  S.cix = buildIndex(m, box, size, r);
+}
+
+// ---- drawing into a target (the screen, or an offscreen layer used to animate a turn) ----
+function layer(wCss, hCss, dpr) {
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(wCss * dpr)); c.height = Math.max(1, Math.round(hCss * dpr));
+  return { c, g: c.getContext("2d"), dpr };
+}
+const screenTarget = () => ({ c: cv, g: ctx, dpr: cv.width / cv.clientWidth });
+function setView(T, cam) {
+  const W = T.c.width, H = T.c.height, sc = view.s * T.dpr;
+  V = { sc, dpr: T.dpr, vx: cam.x, vy: cam.y, W2: W / 2, H2: H / 2, rho: Math.hypot(W, H) / 2 / sc, dt: 2 * Math.sqrt(0.5 / (S.r * sc)) };
+  V.xl = cam.x - V.W2 / sc; V.xh = cam.x + V.W2 / sc; V.yl = cam.y - V.H2 / sc; V.yh = cam.y + V.H2 / sc;
+}
+
 // Append the arc of circle (x, y, r) from angle ta to tb (either direction) to path, in screen coordinates. Inside
 // the view the chord stays within 1/4 px of the arc; outside it the steps grow geometrically away from the view, so
 // even at deep zoom a long boundary arc costs a few dozen points and never cuts through the visible region.
+// Allocation-free: this runs millions of times a frame.
+const UB = new Float64Array(256);
 function emitArc(path, x, y, r, ta, tb, first) {
   const sg = tb >= ta ? 1 : -1, span = Math.abs(tb - ta);
-  const dxv = V.vx - x, dyv = V.vy - y, d = Math.hypot(dxv, dyv);
+  const dxv = V.vx - x, dyv = V.vy - y;
   let ua = 0, ub = span;
-  if (V.rho < r && d > 1e-300) {
-    const m = Math.atan2(dyv, dxv);
-    let uc = sg * (m - ta);
-    uc = uc - TAU * Math.round((uc - span / 2) / TAU);     // the representative nearest the arc
-    const c = (d * d + r * r - V.rho * V.rho) / (2 * d * r);
-    const hw = c >= 1 ? 0 : Math.acos(Math.max(-1, c));
-    ua = Math.max(0, uc - hw); ub = Math.min(span, uc + hw);
-    if (ua > ub) { ua = ub = Math.min(span, Math.max(0, uc)); }
+  if (V.rho < r) {
+    const d = Math.hypot(dxv, dyv);
+    if (d > 1e-300) {
+      let uc = sg * (Math.atan2(dyv, dxv) - ta);
+      uc -= TAU * Math.round((uc - span / 2) / TAU);
+      const c = (d * d + r * r - V.rho * V.rho) / (2 * d * r);
+      const hw = c >= 1 ? 0 : Math.acos(Math.max(-1, c));
+      ua = Math.max(0, uc - hw); ub = Math.min(span, uc + hw);
+      if (ua > ub) ua = ub = Math.min(span, Math.max(0, uc));
+    }
   }
-  const dt = V.dt, us = [];
-  for (let u = ua, s = dt; u > 0; s *= 2) { u = Math.max(0, u - s); us.push(u); }
-  us.reverse();
-  const nmid = Math.min(20000, Math.max(1, Math.ceil((ub - ua) / dt)));
-  for (let q = 0; q <= nmid; q++) us.push(ua + (ub - ua) * q / nmid);
-  for (let u = ub, s = dt; u < span; s *= 2) { u = Math.min(span, u + s); us.push(u); }
-  const bx = (x - V.vx) * V.sc + V.W2, by = (V.vy - y) * V.sc + V.H2, R = r * V.sc, L = 1e7;
-  for (let q = 0; q < us.length; q++) {
-    const t = ta + sg * us[q];
+  const dt = V.dt, bx = (x - V.vx) * V.sc + V.W2, by = (V.vy - y) * V.sc + V.H2, R = r * V.sc, L = 1e7;
+  let started = !first;
+  const put = (u) => {
+    const t = ta + sg * u;
     const px = Math.max(-L, Math.min(L, bx + R * Math.cos(t))), py = Math.max(-L, Math.min(L, by - R * Math.sin(t)));
-    if (first && q === 0) path.moveTo(px, py); else path.lineTo(px, py);
-  }
+    if (started) path.lineTo(px, py); else { path.moveTo(px, py); started = true; }
+  };
+  let nl = 0;                                     // before the window: geometric steps back from it, emitted in order
+  for (let u = ua, s = dt; u > 0 && nl < UB.length; s *= 2) { u = Math.max(0, u - s); UB[nl++] = u; }
+  for (let q = nl - 1; q >= 0; q--) put(UB[q]);
+  const nmid = Math.min(20000, Math.max(1, Math.ceil((ub - ua) / dt)));
+  for (let q = 0; q <= nmid; q++) put(ua + (ub - ua) * q / nmid);
+  for (let u = ub, s = dt; u < span; s *= 2) { u = Math.min(span, u + s); put(u); }
 }
 
-// ---- rendering ----
-// A frame is one or more passes. A pass draws the pieces and cuts that are inside the turning disk ("moving"),
-// outside it ("still") or all of them, seen from a given camera, optionally rotated, with given piece colours and
-// opacity. Turns are composed from passes so that they read at any zoom (see draw()).
-let sel = -1, orbit = null, follow = false;    // selected piece, the slots it can reach, camera rides with it
-
-function setView(cam) {
-  const W = cv.width, H = cv.height, dpr = W / cv.clientWidth, sc = view.s * dpr;
-  V = { sc, dpr, vx: cam.x, vy: cam.y, W2: W / 2, H2: H / 2, rho: Math.hypot(W, H) / 2 / sc, dt: 2 * Math.sqrt(0.5 / (S.r * sc)) };
-  V.xl = cam.x - V.W2 / sc; V.xh = cam.x + V.W2 / sc; V.yl = cam.y - V.H2 / sc; V.yh = cam.y + V.H2 / sc;
-}
-function rotPt(x, y, rot) {
-  const ox = rot.D === 1 ? -1 : 1, dx = x - ox;
-  return [ox + dx * rot.cth - y * rot.sth, dx * rot.sth + y * rot.cth];
-}
 function piecePath(path, f, rot) {
   const F = S.F, r = S.r;
   for (let i = F.FS[f]; i < F.FS[f + 1]; i++) {
     const hh = F.FH[i], k = hh >> 1, c = F.EC[k];
     let x = S.cx[c], y = S.cy[c], t0 = F.E0[k], t1 = F.E1[k];
-    if (rot) { [x, y] = rotPt(x, y, rot); t0 += rot.th; t1 += rot.th; }
+    if (rot) {
+      const ox = rot.D === 1 ? -1 : 1, dx = x - ox;
+      x = ox + dx * rot.cth - y * rot.sth; y = dx * rot.sth + y * rot.cth; t0 += rot.th; t1 += rot.th;
+    }
     if (hh & 1) emitArc(path, x, y, r, t1, t0, i === F.FS[f]); else emitArc(path, x, y, r, t0, t1, i === F.FS[f]);
   }
-  path.closePath();
+  // No closePath: the boundary already ends where it starts, fill closes subpaths anyway, and in Chrome closePath
+  // makes a large Path2D quadratic to build (305k pieces: ~80 s with it, 0.5 s without; identical pixels).
 }
-function pieceInView(f, rot) {
-  const B = S.F.FB;
-  let x0 = B[4 * f], y0 = B[4 * f + 1], x1 = B[4 * f + 2], y1 = B[4 * f + 3];
-  if (rot) {           // rotate the box's centre; its half-diagonal bounds the rotated box
-    const [nx, ny] = rotPt((x0 + x1) / 2, (y0 + y1) / 2, rot), hr = Math.hypot(x1 - x0, y1 - y0) / 2;
-    x0 = nx - hr; x1 = nx + hr; y0 = ny - hr; y1 = ny + hr;
-  }
-  return !(x1 < V.xl || x0 > V.xh || y1 < V.yl || y0 > V.yh);
+function rotPt(x, y, rot) {
+  const ox = rot.D === 1 ? -1 : 1, dx = x - ox;
+  return [ox + dx * rot.cth - y * rot.sth, dx * rot.sth + y * rot.cth];
 }
 
-function pass(cam, which, rot, col, alpha) {
-  setView(cam);
-  ctx.globalAlpha = alpha;
-  const D = anim ? anim.disk : 0;
+// One rendering pass into target T from camera cam: the pieces and cuts inside the turning disk ("moving"), outside
+// it ("still") or all, with piece colours col. Only pieces at least 0.4 px across and cuts at least 0.35 px long are
+// visited; smaller ones cannot be seen.
+function pass(T, cam, which, col) {
+  setView(T, cam);
+  const g = T.g, D = anim ? anim.disk : 0, r = S.r;
   const keep = m => which === "all" || (which === "moving") === !!(m & D);
-  const css = getComputedStyle(document.documentElement), r = S.r;
+  const css = getComputedStyle(document.documentElement);
   const pieces = showPieces();
   if (pieces) {
-    const F = S.F, cols = pieceColors(), paths = cols.map(() => new Path2D()), minPx = 0.4 / V.sc;
-    for (let f = 0; f < F.NF; f++) {
-      const m = F.FM[f];
-      if (!keep(m)) continue;
-      if (F.FB[4 * f + 2] - F.FB[4 * f] < minPx && F.FB[4 * f + 3] - F.FB[4 * f + 1] < minPx) continue;
-      const rr = rot && (m & rot.D) ? rot : null;
-      if (pieceInView(f, rr)) piecePath(paths[col[f]], f, rr);
+    const F = S.F, cols = pieceColors(), paths = cols.map(() => new Path2D());
+    const [list, nl] = query(F.ix, V.xl, V.xh, V.yl, V.yh, 0.4 / V.sc);
+    const B = F.FB;
+    for (let q = 0; q < nl; q++) {
+      const f = list[q];
+      if (!keep(F.FM[f])) continue;
+      if (B[4 * f + 2] < V.xl || B[4 * f] > V.xh || B[4 * f + 3] < V.yl || B[4 * f + 1] > V.yh) continue;
+      piecePath(paths[col[f]], f, null);
     }
-    for (let q = 0; q < cols.length; q++) { ctx.fillStyle = cols[q]; ctx.fill(paths[q]); }
+    for (let q = 0; q < cols.length; q++) { g.fillStyle = cols[q]; g.fill(paths[q]); }
   }
   const cols = ramp(), K = cols.length, paths = cols.map(() => new Path2D());
   const ink = new Path2D(), plain = new Path2D();
-  // with pieces shown for a truncated fractal, draw the cuts only as deep as the traced pieces
   const lim = growGen ?? (pieces && S.faceDepth != null ? S.faceDepth : Infinity);
   const W2 = V.W2, H2 = V.H2, sc = V.sc, vx = V.vx, vy = V.vy, rho = V.rho;
-  for (let k = 0; k < S.s.length; k++) {
-    const g = S.g[k];
-    if (g > lim || !keep(S.f[k])) continue;
-    let x = S.x[k], y = S.y[k], s = S.s[k], e = S.e[k];
-    if (rot && (S.f[k] & rot.D)) { [x, y] = rotPt(x, y, rot); s += rot.th; e += rot.th; }
+  const [list, nl] = query(S.cix, V.xl, V.xh, V.yl, V.yh, 0.35 / sc);
+  for (let q = 0; q < nl; q++) {
+    const k = list[q], gk = S.g[k];
+    if (gk > lim || !keep(S.f[k])) continue;
+    const x = S.x[k], y = S.y[k], s = S.s[k], e = S.e[k];
     const dxv = vx - x, dyv = vy - y, d = Math.hypot(dxv, dyv);
     if (d > r + rho || d < r - rho) continue;
-    let wins = [[s, e]];
+    let w0 = s, w1 = e, w2 = 0, w3 = -1;          // up to two visible windows of the arc
     if (rho < r && d > 1e-300) {
       const c = (d * d + r * r - rho * rho) / (2 * d * r);
       if (c > -1) {
         const h = Math.acos(Math.min(1, c)), m = Math.atan2(dyv, dxv);
-        const w0 = s + ((((m - h) - s) % TAU) + TAU) % TAU;
-        wins = [];
-        for (const a0 of [w0 - TAU, w0]) {
-          const lo = Math.max(s, a0), hi = Math.min(e, a0 + 2 * h);
-          if (hi > lo) wins.push([lo, hi]);
-        }
+        const a0 = s + ((((m - h) - s) % TAU) + TAU) % TAU;
+        w0 = Math.max(s, a0 - TAU); w1 = Math.min(e, a0 - TAU + 2 * h);
+        w2 = Math.max(s, a0); w3 = Math.min(e, a0 + 2 * h);
       }
     }
-    const path = g === 0 ? ink : pieces ? plain : paths[S.bucket[g]];
+    const path = gk === 0 ? ink : pieces ? plain : paths[S.bucket[gk]];
     const bx = (x - vx) * sc + W2, by = (vy - y) * sc + H2;
-    for (const [t0, t1] of wins) {
-      if (r * (t1 - t0) * sc < 0.35) continue;
+    for (let wi = 0; wi < 2; wi++) {
+      const t0 = wi ? w2 : w0, t1 = wi ? w3 : w1;
+      if (!(t1 > t0) || r * (t1 - t0) * sc < 0.35) continue;
       const nseg = Math.min(4000, Math.max(1, Math.ceil((t1 - t0) / V.dt)));
       path.moveTo(bx + r * Math.cos(t0) * sc, by - r * Math.sin(t0) * sc);
-      for (let q = 1; q <= nseg; q++) {
-        const t = t0 + (t1 - t0) * q / nseg;
+      for (let p = 1; p <= nseg; p++) {
+        const t = t0 + (t1 - t0) * p / nseg;
         path.lineTo(bx + r * Math.cos(t) * sc, by - r * Math.sin(t) * sc);
       }
     }
   }
-  ctx.lineCap = "round";
-  ctx.lineWidth = Math.max(1, 0.9 * V.dpr);
-  for (let q = K - 1; q >= 0; q--) { ctx.strokeStyle = cols[q]; ctx.stroke(paths[q]); }
+  g.lineCap = "round";
+  g.lineWidth = Math.max(1, 0.9 * V.dpr);
+  for (let q = K - 1; q >= 0; q--) { g.strokeStyle = cols[q]; g.stroke(paths[q]); }
   const fg = css.getPropertyValue("--fg").trim();
   if (pieces) {
-    ctx.globalAlpha = alpha * 0.55; ctx.lineWidth = Math.max(0.8, 0.7 * V.dpr);
-    ctx.strokeStyle = fg; ctx.stroke(plain);
-    ctx.globalAlpha = alpha;
+    g.globalAlpha = 0.55; g.lineWidth = Math.max(0.8, 0.7 * V.dpr);
+    g.strokeStyle = fg; g.stroke(plain);
+    g.globalAlpha = 1;
   }
-  ctx.lineWidth = 1.6 * V.dpr;
-  ctx.strokeStyle = fg;
-  ctx.stroke(ink);
+  g.lineWidth = 1.6 * V.dpr;
+  g.strokeStyle = fg;
+  g.stroke(ink);
+}
+function clearTarget(T, bg) {
+  T.g.setTransform(1, 0, 0, 1, 0, 0);
+  T.g.globalAlpha = 1;
+  if (bg) { T.g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--surface").trim(); T.g.fillRect(0, 0, T.c.width, T.c.height); }
+  else T.g.clearRect(0, 0, T.c.width, T.c.height);
+}
+
+// Draw layer L (rendered from camera Lcam at the current zoom) onto the screen, as seen from camera cam after the
+// world rotation rot (or none). The map layer pixel -> world -> rotated world -> screen pixel is a similarity, so it
+// is one canvas transform.
+function blit(L, Lcam, cam, rot, alpha, Ls) {
+  const Ldpr = L.dpr, W = cv.width, H = cv.height, sd = cv.width / cv.clientWidth;
+  const s0 = (Ls ?? view.s) * Ldpr, s1 = view.s * sd;
+  const f = (qx, qy) => {
+    let wx = Lcam.x + (qx - L.c.width / 2) / s0, wy = Lcam.y - (qy - L.c.height / 2) / s0;
+    if (rot) [wx, wy] = rotPt(wx, wy, rot);
+    return [W / 2 + (wx - cam.x) * s1, H / 2 - (wy - cam.y) * s1];
+  };
+  const [ex, ey] = f(0, 0), [px, py] = f(1, 0), [qx, qy] = f(0, 1);
+  ctx.setTransform(px - ex, py - ey, qx - ex, qy - ey, ex, ey);
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(L.c, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
 }
 
-// Where the animation is: eased progress, the rotation so far, and the camera (which rides with the selected piece
-// when that piece is in the turning disk).
+// ---- frames ----
+// At rest the screen shows an exact render, cached; panning and zooming move the cached image at once and the
+// exact render follows when the view settles. A turn is drawn by moving pre-rendered layers (see startTurn) and is
+// rendered exactly again when it ends.
+let cache = null, colVersion = 0, settleTimer = null, lastExactMs = 0;
+const staticKey = () => [S && S.n, S && S.r, S && S.cix && S.cix.n, colVersion, $("mode").value, growGen, dark(),
+                         cv.width, cv.height].join("|");
+function renderExact() {
+  const t0 = performance.now();
+  const T = screenTarget(), L = layer(cv.clientWidth, cv.clientHeight, T.dpr);
+  clearTarget(L, true);
+  pass(L, view, "all", S.col);
+  cache = { L, cam: { x: view.x, y: view.y }, s: view.s, key: staticKey() };
+  lastExactMs = performance.now() - t0;
+}
+function drawStatic() {
+  const fresh = cache && cache.key === staticKey();
+  const exactView = fresh && cache.s === view.s && cache.cam.x === view.x && cache.cam.y === view.y;
+  if (!exactView) {
+    if (fresh && lastExactMs > 25) {       // show the moved cached image now, re-render once the view settles
+      clearTarget(screenTarget(), true);
+      blit(cache.L, cache.cam, view, null, 1, cache.s);
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => { settleTimer = null; draw(); }, 140);
+      return;
+    }
+    renderExact();
+  }
+  clearTarget(screenTarget(), false);
+  ctx.drawImage(cache.L.c, 0, 0);
+}
+
 function animAt() {
   const u = Math.min(1, (performance.now() - anim.t0) / anim.dur), e = u < .5 ? 2 * u * u : 1 - 2 * (1 - u) * (1 - u);
   const mk = t => { const th = anim.dir * (TAU / S.n) * t; return { D: anim.disk, th, cth: Math.cos(th), sth: Math.sin(th) }; };
   const camAt = t => {
-    if (!anim.ride) return view;
+    if (!anim.ride) return { x: view.x, y: view.y };
     const [x, y] = rotPt(anim.c0[0], anim.c0[1], mk(t));
     return { x: x + anim.off[0], y: y + anim.off[1] };
   };
   return { e, rot: mk(e), cam: camAt(e), cam0: camAt(0), cam1: camAt(1) };
 }
-
 function draw() {
-  const W = cv.width, H = cv.height;
-  const css = getComputedStyle(document.documentElement);
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalAlpha = 1;
-  ctx.fillStyle = css.getPropertyValue("--surface").trim();
-  ctx.fillRect(0, 0, W, H);
+  const sd = cv.width / cv.clientWidth;
   $("hud").textContent = `zoom ×${(view.s / baseScale).toPrecision(3)}`;
-  if (!S) { minimap(null); return; }
+  if (!S) { clearTarget(screenTarget(), true); minimap(null); return; }
   const a = anim ? animAt() : null;
-  if (!a) pass(view, "all", null, S.col, 1);
-  else if (!anim.huge) pass(a.cam, "all", a.rot, S.col, 1);           // the turn is visible as a sweep
-  else if (anim.ride) {
-    // deep zoom, riding with the selected piece: its disk turns rigidly with the camera; the outside, which would
-    // sweep past far too fast to see, crossfades from where it was to where it ends up
-    pass(a.cam0, "still", null, S.col, 1 - a.e);
-    pass(a.cam1, "still", null, S.col, a.e);
-    pass(a.cam, "moving", a.rot, S.col, 1);
-  } else {
-    // deep zoom, fixed camera: the cut pattern maps onto itself, so show the turn as the pieces' colours flowing
-    // into their new slots
-    pass(view, "still", null, S.col, 1);
-    pass(view, "moving", null, S.col, 1);
-    if (anim.newCol) pass(view, "moving", null, anim.newCol, a.e);
-  }
+  if (a) drawAnim(a); else drawStatic();
   overlays(a);
   minimap(a);
 }
@@ -999,23 +1113,22 @@ function draw() {
 function overlays(a) {
   if (!S || !S.F || sel < 0 || !showPieces()) return;
   const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
-  setView(a ? a.cam : view);
+  setView(screenTarget(), a ? a.cam : view);
   const moving = f => a && (S.F.FM[f] & anim.disk);
   const rotFor = f => (a && moving(f) && !(anim.huge && !anim.ride)) ? a.rot : null;
-  if (orbit && orbit.length > 1 && !(a && anim.huge)) {
-    const p = new Path2D(), minPx = 1.5 / V.sc;
+  if (orbit && orbit.length > 1 && !a) {
+    const p = new Path2D(), minPx = 1.5 / V.sc, B = S.F.FB;
     for (const f of orbit) {
       if (f === sel) continue;
-      const B = S.F.FB;
       if (B[4 * f + 2] - B[4 * f] < minPx && B[4 * f + 3] - B[4 * f + 1] < minPx) continue;
-      const rr = rotFor(f);
-      if (pieceInView(f, rr)) piecePath(p, f, rr);
+      if (B[4 * f + 2] < V.xl || B[4 * f] > V.xh || B[4 * f + 3] < V.yl || B[4 * f + 1] > V.yh) continue;
+      piecePath(p, f, null);
     }
     ctx.lineWidth = 1.8 * V.dpr; ctx.strokeStyle = accent; ctx.stroke(p);
   }
   if (a && anim.huge && !anim.ride && moving(sel)) return;   // it is crossfading away; its new slot is outlined after
-  const p = new Path2D(), rr = rotFor(sel);
-  piecePath(p, sel, rr);
+  const p = new Path2D();
+  piecePath(p, sel, rotFor(sel));
   ctx.lineJoin = "round";
   ctx.lineWidth = 4.5 * V.dpr; ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--surface").trim(); ctx.stroke(p);
   ctx.lineWidth = 2.2 * V.dpr; ctx.strokeStyle = accent; ctx.stroke(p);
@@ -1069,14 +1182,13 @@ function stopAnim() {
 }
 let nextDisk = 1;
 function frame() {
-  if (anim) {
-    if (performance.now() - anim.t0 >= anim.dur) {
-      finishTurn();
-      if ($("turn").getAttribute("aria-pressed") === "true") startTurn();
-    }
-    draw();
-    if (anim || $("turn").getAttribute("aria-pressed") === "true") requestAnimationFrame(frame);
+  if (!anim) return;
+  if (performance.now() - anim.t0 >= anim.dur) {
+    finishTurn();
+    if ($("turn").getAttribute("aria-pressed") === "true") startTurn();   // straight on: no exact render between turns
   }
+  draw();
+  if (anim) requestAnimationFrame(frame);
 }
 function permuted(col, D, dir) {
   const P = D === 1 ? S.F.PA : S.F.PB, FM = S.F.FM, out = col.slice();
@@ -1086,15 +1198,63 @@ function permuted(col, D, dir) {
   }
   return out;
 }
+// A turn is drawn from layers rendered once here: the part outside the turning disk and the part inside it. Each
+// frame then only moves images (translation, or the disk's rotation), so the cost of a frame no longer depends on how
+// many pieces there are. Layers are rendered at CSS-pixel resolution with enough margin for whatever moves into view;
+// the turn's final position is rendered exactly.
 function startTurn() {
   const D = nextDisk;
   nextDisk = 3 - nextDisk;
-  anim = { disk: D, dir: Math.random() < .5 ? 1 : -1, t0: performance.now(), dur: +$("speed").value };
+  anim = { disk: D, dir: Math.random() < .5 ? 1 : -1, dur: +$("speed").value };
   if (S.F) anim.newCol = permuted(S.col, D, anim.dir);
   anim.ride = !!(follow && S.F && sel >= 0 && (S.F.FM[sel] & D));
   if (anim.ride) { const c = centroid(sel); anim.c0 = c; anim.off = [view.x - c[0], view.y - c[1]]; }
-  // a turn carries points up to r*2pi/n; far beyond the screen size a sweep is just a blur
-  anim.huge = S.r * TAU / S.n * view.s > 1.5 * Math.max(cv.clientWidth, cv.clientHeight);
+  const W = cv.clientWidth, H = cv.clientHeight, diag = Math.hypot(W, H);
+  const disp = S.r * TAU / S.n * view.s;                    // how far a turn carries a point, in CSS px
+  anim.huge = disp > 0.5 * Math.max(W, H);                   // farther than that, a sweep is just a blur
+  const cam0 = { x: view.x, y: view.y }, P = { cam0 };
+  const mk = (m, bg, which, col, cam, dpr = 1) => {
+    const L = layer(W + 2 * m, H + 2 * m, dpr);
+    clearTarget(L, bg);
+    pass(L, cam, which, col);
+    return L;
+  };
+  if (!anim.huge) {
+    const m = Math.ceil(Math.min(diag, Math.max(disp, anim.ride ? (TAU / S.n) * diag / 2 : 0))) + 4;
+    P.still = mk(m, true, "still", S.col, cam0);
+    P.moving = mk(m, false, "moving", S.col, cam0);
+  } else if (anim.ride) {
+    const t1 = anim.dir * TAU / S.n, rot1 = { D, th: t1, cth: Math.cos(t1), sth: Math.sin(t1) };
+    const [x1, y1] = rotPt(anim.c0[0], anim.c0[1], rot1);
+    P.cam1 = { x: x1 + anim.off[0], y: y1 + anim.off[1] };
+    const sd = cv.width / W;
+    P.still0 = mk(0, true, "still", S.col, cam0, sd);
+    P.still1 = mk(0, true, "still", S.col, P.cam1, sd);
+    P.moving = mk(Math.ceil(Math.min(diag, (TAU / S.n) * diag / 2)) + 4, false, "moving", S.col, cam0);
+  } else {
+    const sd = cv.width / W;                                 // nothing moves: render these at full resolution
+    P.still = mk(0, true, "still", S.col, cam0, sd);
+    P.movOld = mk(0, false, "moving", S.col, cam0, sd);
+    if (anim.newCol) P.movNew = mk(0, false, "moving", anim.newCol, cam0, sd);
+  }
+  anim.layers = P;
+  anim.t0 = performance.now();                               // time the turn from when its layers are ready
+}
+function drawAnim(a) {
+  const P = anim.layers;
+  clearTarget(screenTarget(), true);
+  if (!anim.huge) {
+    blit(P.still, P.cam0, a.cam, null, 1);                   // the still part only translates (camera riding)
+    blit(P.moving, P.cam0, a.cam, a.rot, 1);                 // the turning disk rotates as one
+  } else if (anim.ride) {
+    blit(P.still0, P.cam0, P.cam0, null, 1);                 // the outside crossfades from where it was...
+    blit(P.still1, P.cam1, P.cam1, null, a.e);               // ...to where it ends up
+    blit(P.moving, P.cam0, a.cam, a.rot, 1);
+  } else {
+    blit(P.still, P.cam0, a.cam, null, 1);
+    blit(P.movOld, P.cam0, a.cam, null, 1);                  // the slots keep their shape; colours flow in
+    if (P.movNew) blit(P.movNew, P.cam0, a.cam, null, a.e);
+  }
 }
 function finishTurn() {
   const th = anim.dir * TAU / S.n, c = Math.cos(th), s = Math.sin(th), D = anim.disk, ox = D === 1 ? -1 : 1;
@@ -1115,8 +1275,9 @@ function finishTurn() {
     }
   }
   spokes[D] += th;
+  colVersion++;
   anim = null;
-  splitByDisks();   // membership changes after a turn
+  splitByDisks();   // membership changes after a turn (and the cut index is rebuilt)
 }
 function animAtEnd() {
   const rot = { D: anim.disk, th: anim.dir * TAU / S.n, cth: Math.cos(anim.dir * TAU / S.n), sth: Math.sin(anim.dir * TAU / S.n) };

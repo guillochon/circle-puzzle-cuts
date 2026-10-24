@@ -41,6 +41,13 @@ Everything runs in the browser, in one file (`index.html`); the computation runs
   therefore computed live and independently of the Python table: n = 200 gives 1,094,205 = a(200) in about 6 s. A
   turn maps pieces to pieces; the page finds that permutation by matching one edge of each piece (off the turning
   disk's rim) to its rotated image, and checks it is a bijection.
+- **Speed.** Pieces and cuts are indexed by size (a wide view visits only those at least ~half a pixel across) and on a
+  grid (a zoomed view visits only those near the screen). The screen shows a cached exact render; panning and zooming
+  move the cached image and the exact render follows when the view settles. A turn renders the still part and the
+  turning disk once, as layers, and each frame only moves those images; the end of the turn is rendered exactly.
+  No <code>closePath</code>: in Chrome it makes a large Path2D quadratic to build (n = 7 at its critical radius: 81 s
+  per full-view render with it, under 1 s without, identical pixels). n = 200 renders in about 20 ms, a deep zoom in
+  under 15 ms.
 - **Drawing.** Canvas 2D, with the view transform done in double precision and each arc clipped to the view and
   sampled so the chord stays within a quarter pixel, so lines stay sharp at any zoom.
 
