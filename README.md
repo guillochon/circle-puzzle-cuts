@@ -13,6 +13,12 @@ critical radius, a fractal (drawn to a budget) above it.
   shortest arc (about 2.5·10⁻⁶ at n = 200).
 - **Animation.** "Turn the disks" alternates turns of the two disks; on a finite puzzle each turn maps the cuts onto
   themselves while the generation colours travel. "Grow by generation" reveals the cuts in the order they are made.
+- **Following a piece.** Click a piece to select it: the camera rides with it through every turn (it stays at
+  the same pixel even at ×10⁵ zoom, n = 200), and every slot it can reach (its orbit under the two turns) is
+  outlined. An inset shows both disks, which one is turning, the view and the selected piece; click it to jump.
+- **Deep zoom.** When a turn would carry content more than 1.5 screens, it is shown as a crossfade: the cut pattern
+  maps onto itself, so each slot takes on the colour of the piece that arrives (and, when riding with a piece, its
+  own disk turns rigidly while the outside crossfades).
 - **Colours.** Every piece is filled with its own shade, from three families: pieces that start in the left disk only,
   the right disk only, or the lens they share. A turn carries each colour to where its piece goes, so the families
   mix. "Cuts by generation" instead colours each cut by the number of turns it took to make it.
